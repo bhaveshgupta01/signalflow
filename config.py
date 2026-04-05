@@ -58,5 +58,9 @@ DB_PATH = os.getenv("SIGNALFLOW_DB_PATH", "signalflow.db")
 # ── Paper Trading ────────────────────────────────────────────────────────────
 PAPER_WALLET_STARTING_BALANCE = 100.0
 
+# ── Portfolio Limits ────────────────────────────────────────────────────────
+MAX_PORTFOLIO_EXPOSURE_USD = 1000   # max total USD across all open positions
+MAX_CONCURRENT_POSITIONS = 5       # max number of positions open at once
+
 # ── Dashboard ────────────────────────────────────────────────────────────────
 DASHBOARD_REFRESH_SECONDS = 10

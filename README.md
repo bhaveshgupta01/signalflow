@@ -1,14 +1,14 @@
 # SignalFlow
 
-**AI crypto trading agent that monitors prediction markets, whale wallets, and funding rates to trade perpetual futures — all on a $100 virtual wallet.**
+**AI crypto trading agent that monitors prediction markets, whale wallets, and funding rates to trade perpetual futures — all powered by [Boba Agents MCP](https://tradeboba.com) on a $100 virtual wallet.**
 
-Built with Gemini 2.5 Flash (Vertex AI) + Boba Agents MCP (85 tools) + Hyperliquid + Polymarket
+Built with **Boba Agents MCP** (85+ tools, 9 chains) + Gemini 2.5 Flash (Vertex AI) + Hyperliquid + Polymarket
 
 ---
 
 ## What It Does
 
-Give the agent $100. It scans Polymarket prediction markets, tracks KOL whale wallets, monitors funding rate anomalies, and uses Gemini AI to decide when to open leveraged trades on Hyperliquid. Every position gets a stop-loss, take-profit, trailing stop, and AI-driven exit analysis. The dashboard shows one unified chart of how your $100 is doing — each investment as a colored line, with buy/sell markers.
+Give the agent $100. It scans Polymarket prediction markets, tracks KOL whale wallets, monitors funding rate anomalies, and uses Gemini AI to decide when to open leveraged trades on Hyperliquid — all through Boba's unified MCP interface. Every position gets a stop-loss, take-profit, and auto-management. The 6-page dashboard shows everything: a landing page explaining the project, wallet growth charts, per-investment lines with buy/sell markers, signal history, whale intelligence, and agent performance analytics.
 
 ### Results (overnight run)
 - **$100 -> $105.56 (+5.6%)** in 12 hours
@@ -27,23 +27,20 @@ Give the agent $100. It scans Polymarket prediction markets, tracks KOL whale wa
      EVENT BUS (asyncio.Queue)
            |
      AGENT BRAIN
-       1. DETECT signal (no AI, pure math)
-       2. INTERPRET signal (dip market = bullish, etc.)
-       3. ANALYZE with Gemini + 85 Boba tools
-       4. RISK CHECK (do we have the money?)
-       5. EXECUTE trade via hl_place_order
-       6. MANAGE positions:
-          - SL/TP every check
-          - Trailing stop at 5% profit
-          - AI exit analysis every 30 min
-          - 6h hard age limit
-       7. SNAPSHOT for charts
+       1. SCAN — detect signals (no AI, pure math)
+       2. ANALYZE — Gemini evaluates with 85 Boba tools
+       3. RISK GATE — enforce hard limits (no LLM override)
+       4. EXECUTE — hl_place_order + SL/TP via Boba
+       5. MANAGE — monitor positions, auto-close on SL/TP or 4h age
+       6. SNAPSHOT — record wallet + position state for charts
            |
-     STREAMLIT DASHBOARD
-       One chart: wallet + each investment's journey
-       P&L and win rate displayed prominently
-       Trade history with AI reasoning
-       KOL whale intelligence
+     STREAMLIT DASHBOARD (6 pages)
+       Landing page — project overview & Boba showcase
+       Command Center — pipeline status & metrics
+       Portfolio — wallet growth + per-investment charts
+       Market Scanner — signals & AI reasoning
+       Whale Intelligence — KOL tracking
+       Agent Performance — conviction vs PnL analytics
 ```
 
 ---
@@ -126,10 +123,7 @@ The agent understands prediction market semantics:
 |-------|---------|--------|
 | Stop-loss | Price hits SL (4% adverse) | Instant close |
 | Take-profit | Price hits TP (10% favorable) | Instant close |
-| Trailing stop | PnL > 5% | Move SL to break-even |
-| AI exit analysis | Every 30 min after 1 hour | Gemini evaluates: hold or close? |
-| Position flip | Better opportunity opposite direction | Close old, open new |
-| Hard age limit | 6 hours | Safety net close |
+| Hard age limit | 4 hours | Safety net auto-close |
 
 ### Risk Management
 Only real constraints:
@@ -145,20 +139,22 @@ Only real constraints:
 ```
 signalflow/
   runner.py          Entry point — event loop with Boba retry/reconnect
-  agent.py           Core brain — analyze, execute, manage, AI exit analysis
-  risk.py            Wallet-based risk (margin check, no artificial limits)
+  agent.py           Core brain — analyze, execute, manage positions
+  risk.py            Wallet-based risk (margin check, hard limits)
   signals.py         Polymarket signal detection + dead market filter
-  kol_tracker.py     KOL whale tracking (429 wallets via Boba)
+  kol_tracker.py     KOL whale tracking via Boba
   triggers.py        6 async triggers with exponential backoff
   event_bus.py       asyncio.Queue connecting triggers to agent
   mcp_client.py      Boba MCP connection wrapper
   config.py          All parameters in one place
   models.py          Pydantic data models
   db.py              SQLite persistence (7 tables, indexed)
-  dashboard.py       Streamlit multi-page app
+  seed_data.py       Demo data generator
+  dashboard.py       Streamlit multi-page app (6 pages)
   pages/
+    00_landing.py    Landing page — project overview + Boba showcase
     01_overview.py   Command center — pipeline + metrics
-    02_portfolio.py  THE chart — wallet + per-investment lines + buy/sell markers
+    02_portfolio.py  Portfolio — wallet + per-investment lines + buy/sell markers
     03_signals.py    Market scanner with filtering
     04_analytics.py  Agent performance — conviction vs PnL
     05_kol_tracker.py  Whale intelligence

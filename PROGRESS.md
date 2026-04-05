@@ -56,12 +56,15 @@ An aggressive AI crypto trading agent that:
 | db.py | Added get_trade_events(), update_position(stop_loss=), 7 indexes |
 | pages/02_portfolio.py | Unified chart: wallet + per-investment lines + buy/sell markers |
 | pages/01_overview.py | Fixed "Claude" -> "Gemini" reference |
+| dashboard.py | Added landing page as default entry, now 6 pages |
+| config.py | Added MAX_PORTFOLIO_EXPOSURE_USD, MAX_CONCURRENT_POSITIONS |
 | pyproject.toml | Fixed build-backend, added plotly/gunicorn deps |
 
 ## Files Created
 
 | File | Purpose |
 |------|---------|
+| pages/00_landing.py | Landing page — full project overview, architecture, Boba MCP showcase |
 | Dockerfile | Multi-stage Node.js + Python |
 | docker-compose.yml | 3 services: boba-proxy, agent, dashboard |
 | run.sh | One-command launcher |
@@ -83,7 +86,7 @@ An aggressive AI crypto trading agent that:
 | kol_signals | 234 | KOL whale trades |
 | agent_decisions | 2,285 | Every agent cycle logged |
 
-**Total: ~3,930 lines of Python across 18 files**
+**Total: ~4,200 lines of Python across 19 files**
 
 ---
 

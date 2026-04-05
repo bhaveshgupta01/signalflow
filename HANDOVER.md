@@ -20,8 +20,8 @@ Built to impress the Boba Agents team — demonstrates deep usage of their 85-to
 ```
 ┌──────────────────────────────────────────────────────┐
 │              6 EVENT-DRIVEN TRIGGERS                  │
-│  Polymarket (60s) | KOL (90s) | Funding (120s)       │
-│  Token Discovery (180s) | Cross-Chain (300s)          │
+│  Polymarket (45s) | KOL (60s) | Funding (90s)        │
+│  Token Discovery (120s) | Cross-Chain (180s)          │
 │  Portfolio Sync (300s)                                │
 └──────────────────────┬───────────────────────────────┘
                        ▼
@@ -42,7 +42,7 @@ Built to impress the Boba Agents team — demonstrates deep usage of their 85-to
                        ▼
               ┌─────────────────┐
               │  Streamlit UI   │
-              │  5-page dash    │
+              │  6-page dash    │
               └─────────────────┘
 ```
 
@@ -94,7 +94,7 @@ The agent's tool loop gives Gemini access to every Boba tool dynamically.
 
 ```
 signalflow/
-├── dashboard.py          # Streamlit nav router (5 pages)
+├── dashboard.py          # Streamlit nav router (6 pages)
 ├── runner.py             # Entry point — event-driven loop
 ├── agent.py              # Core agent: analyze, risk, execute, manage
 ├── event_bus.py          # Event queue + TriggerType enum
@@ -114,6 +114,7 @@ signalflow/
 ├── styles/
 │   └── theme.py          # Shared CSS + Plotly defaults
 └── pages/
+    ├── 00_landing.py     # Landing page — project overview + Boba showcase
     ├── 01_overview.py    # Command Center — pipeline + API connections
     ├── 02_portfolio.py   # Portfolio — wallet, trades, growth chart
     ├── 03_signals.py     # Market Scanner — raw signals + analysis
@@ -172,14 +173,16 @@ cd ~/signalflow && python3 -m streamlit run dashboard.py
 | Parameter | Value | Purpose |
 |-----------|-------|---------|
 | PAPER_WALLET_STARTING_BALANCE | $100 | Virtual capital |
-| MAX_PORTFOLIO_EXPOSURE_USD | $1000 | Max total position size |
-| MAX_SINGLE_POSITION_USD | $200 | Max per trade |
-| MAX_LEVERAGE | 3x | Conservative leverage cap |
-| MAX_CONCURRENT_POSITIONS | 3 | Position count limit |
-| DEFAULT_STOP_LOSS_PCT | 5% | Auto-close losing trades |
-| DEFAULT_TAKE_PROFIT_PCT | 15% | Auto-close winning trades |
-| CONVICTION_THRESHOLD | 0.7 | Min confidence to trade |
+| MAX_PORTFOLIO_EXPOSURE_USD | $1,000 | Max total USD across all open positions |
+| MAX_SINGLE_POSITION_PCT | 50% | Max % of wallet balance on one trade |
+| MAX_CONCURRENT_POSITIONS | 5 | Max number of positions open at once |
+| DEFAULT_STOP_LOSS_PCT | 4% | Auto-close losing trades |
+| DEFAULT_TAKE_PROFIT_PCT | 10% | Auto-close winning trades |
+| MAX_POSITION_AGE_HOURS | 4h | Auto-close old positions |
+| CONVICTION_THRESHOLD | 0.55 | Min confidence to trade (aggressive) |
 | KOL_SIGNAL_BOOST | 0.15 | +15% conviction when KOL aligns |
+| MIN_SIGNAL_PRICE_CHANGE | 3% | Minimum Polymarket move to trigger signal |
+| SIGNAL_DEDUP_MINUTES | 5 | Re-evaluate markets every 5 min |
 
 ---
 
@@ -211,6 +214,14 @@ cd ~/signalflow && python3 -m streamlit run dashboard.py
 - Margin enforcement in risk engine
 - Streamlined to 5 pages (removed redundancy)
 - 20+ Boba tools used directly
+
+### v5 (Day 4): Landing Page + Polish
+- Added landing page (00_landing.py) as default entry point — full project overview
+- Boba Agents MCP highlighted as the core engine with tool showcase
+- Architecture, trading strategies, tech stack, risk parameters all on one page
+- Dashboard now 6 pages (landing + 5 operational)
+- Fixed missing config constants (MAX_PORTFOLIO_EXPOSURE_USD, MAX_CONCURRENT_POSITIONS)
+- Updated all docs (README, PROGRESS, HANDOVER) with accurate config values
 
 ---
 

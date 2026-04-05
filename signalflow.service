@@ -1,0 +1,16 @@
+[Unit]
+Description=SignalFlow AI Trading Agent + Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/signalflow
+EnvironmentFile=/root/signalflow/.env
+ExecStart=/bin/bash /root/signalflow/start.sh
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

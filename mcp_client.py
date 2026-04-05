@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 from contextlib import AsyncExitStack
 
 from mcp import ClientSession
@@ -13,10 +14,28 @@ from config import BOBA_API_KEY
 
 logger = logging.getLogger(__name__)
 
-# Resolve the boba binary path
-_BOBA_BIN = os.path.expanduser(
-    "~/.npm/_npx/528a0913b9bfc11d/node_modules/.bin/boba"
-)
+# Try to find the boba binary
+_BOBA_PATHS = [
+    os.path.expanduser("~/.npm/_npx/528a0913b9bfc11d/node_modules/.bin/boba"),
+    os.path.expanduser("~/.npm/_npx/*/node_modules/.bin/boba"),
+]
+
+
+def _find_boba_bin() -> str | None:
+    """Find the boba binary on disk."""
+    import glob
+    for pattern in _BOBA_PATHS:
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    # Check if it's in PATH
+    try:
+        result = subprocess.run(["which", "boba"], capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
 
 
 class BobaClient:
@@ -29,10 +48,13 @@ class BobaClient:
 
     async def connect(self) -> None:
         """Start the Boba MCP server and initialise the session."""
-        if os.path.exists(_BOBA_BIN):
-            command, args = _BOBA_BIN, ["mcp"]
+        boba_bin = _find_boba_bin()
+        if boba_bin and os.path.exists(boba_bin):
+            command, args = boba_bin, ["mcp"]
+            logger.info("Using boba binary: %s", boba_bin)
         else:
             command, args = "npx", ["-y", "@tradeboba/cli@latest", "mcp"]
+            logger.info("Using npx to launch boba")
 
         server_params = StdioServerParameters(
             command=command,
@@ -40,7 +62,6 @@ class BobaClient:
             env={**os.environ, "BOBA_API_KEY": BOBA_API_KEY},
         )
 
-        # Use AsyncExitStack to keep the stdio transport alive
         self._exit_stack = AsyncExitStack()
         read_stream, write_stream = await self._exit_stack.enter_async_context(
             stdio_client(server_params)

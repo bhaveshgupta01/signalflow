@@ -521,7 +521,7 @@ st.markdown(
         <div style="display:inline-block;background:linear-gradient(135deg, #6c63ff, #29b6f6);
             color:#fff;font-size:0.82rem;font-weight:700;padding:8px 24px;border-radius:8px;
             letter-spacing:0.03em;">
-            Built on Boba Agents MCP &mdash; tradeboba.com
+            Built on Boba Agents MCP &mdash; agent.boba.xyz
         </div>
     </div>
     """,

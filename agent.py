@@ -24,8 +24,10 @@ from google.genai import types
 from config import (
     GEMINI_MODEL, CONVICTION_THRESHOLD, KOL_SIGNAL_BOOST,
     PAPER_WALLET_STARTING_BALANCE, MAX_POSITION_AGE_HOURS,
+    TRADE_COOLDOWN_MINUTES,
 )
 from db import (
+    get_last_trade_time,
     get_open_positions,
     get_stats,
     save_analysis,
@@ -61,39 +63,44 @@ from signals import detect_signals
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-You are SignalFlow, an aggressive AI crypto trading agent. You have $100 to \
-exploit any edge you can find. You trade perpetual futures on Hyperliquid.
+You are SignalFlow, a disciplined AI crypto trading agent. You manage a $100 \
+paper wallet and trade perpetual futures on Hyperliquid. Your goal is a high \
+win rate — only trade when you have a clear, well-reasoned edge.
 
 ## Your job
 You receive market signals — prediction market moves, whale trades, funding \
-rate spikes, or trending tokens. Your job is to find the trade and size it.
+rate spikes, or trending tokens. Your job is to evaluate whether there is a \
+genuine, actionable edge worth trading. Most signals are noise — reject them.
 
 1. Use tools to gather data:
    - Polymarket sentiment, holders, price history
    - Hyperliquid price, funding rates, order book depth
    - Any other data that helps you decide
 
-2. Decide: is there an edge? If yes, trade it aggressively.
-   - High conviction = big position. Low conviction = small position or skip.
-   - Think in hours, not days. We close positions within 4 hours.
+2. Be selective. Only trade when multiple data points align:
+   - The signal is significant (not a small random fluctuation)
+   - The direction is clear and supported by data
+   - The risk/reward is favorable (potential gain > potential loss)
+   - You can articulate a specific edge, not just "momentum"
 
 3. Return JSON (no markdown fences):
 {
   "conviction": <float 0.0–1.0>,
   "direction": "long" | "short",
   "asset": "<BTC, ETH, SOL, etc — must be on Hyperliquid>",
-  "suggested_size_usd": <float — be aggressive, size based on conviction>,
-  "leverage": <int 1-5>,
-  "reasoning": "<2-3 sentences — what's the edge and why now>",
-  "risk_notes": "<what could go wrong>"
+  "suggested_size_usd": <float — conservative, proportional to conviction>,
+  "leverage": <int 1-3>,
+  "reasoning": "<2-3 sentences — what's the specific edge and why it's reliable>",
+  "risk_notes": "<what could go wrong, what would invalidate this trade>"
 }
 
 ## Rules
-- Be aggressive. You're here to make money, not sit on cash.
-- If conviction > 0.6, trade it. Size proportionally.
-- suggested_size_usd should reflect your confidence: 0.6 conviction = $30-50, 0.9 conviction = $80-150.
+- Quality over quantity. It is BETTER to skip a marginal signal than to take a bad trade.
+- If you're unsure, set conviction below 0.5. Only set conviction above 0.7 when the edge is clear.
+- suggested_size_usd should be conservative: 0.7 conviction = $20-35, 0.9 conviction = $50-80.
+- Keep leverage low (1-2x default, 3x only for the strongest setups).
 - Only suggest assets on Hyperliquid perps (BTC, ETH, SOL, DOGE, ARB, etc.)
-- Explain the edge clearly.
+- A vague "bullish momentum" is NOT an edge. Name the specific catalyst.
 """
 
 TRADE_PROMPT = """\
@@ -209,6 +216,18 @@ async def run_cycle(client: genai.Client, boba: BobaClient) -> AgentDecision:
     kol_signals = await detect_kol_signals(boba)
     logger.info("Detected %d KOL signals", len(kol_signals))
 
+    # ── Cooldown check: don't trade too rapidly ─────────────────────────
+    last_trade = get_last_trade_time()
+    in_cooldown = False
+    if last_trade:
+        minutes_since = (datetime.utcnow() - last_trade).total_seconds() / 60
+        if minutes_since < TRADE_COOLDOWN_MINUTES:
+            in_cooldown = True
+            logger.info(
+                "Trade cooldown: %.0f min since last trade (need %d min)",
+                minutes_since, TRADE_COOLDOWN_MINUTES,
+            )
+
     # ── Phase 2 & 3 & 4: Analyze, Risk-check, Execute ────────────────────
     for signal in signals:
         analysis = await _analyze_signal(client, boba, signal)
@@ -235,8 +254,17 @@ async def run_cycle(client: genai.Client, boba: BobaClient) -> AgentDecision:
 
         if analysis.conviction_score < CONVICTION_THRESHOLD:
             logger.info(
-                "Low conviction (%.2f) for %s — skipping",
-                analysis.conviction_score, signal.market_question,
+                "Low conviction (%.2f < %.2f) for %s — skipping",
+                analysis.conviction_score, CONVICTION_THRESHOLD,
+                signal.market_question[:50],
+            )
+            continue
+
+        # Cooldown gate: analyze freely, but don't execute during cooldown
+        if in_cooldown:
+            logger.info(
+                "Cooldown active — skipping execution for %s (conviction=%.2f)",
+                analysis.suggested_asset, analysis.conviction_score,
             )
             continue
 

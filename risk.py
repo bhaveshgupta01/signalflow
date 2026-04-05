@@ -1,10 +1,12 @@
-"""Risk management — only real constraint: don't spend more than you have.
+"""Risk management — disciplined constraints to improve win rate.
 
-No artificial position limits. No max leverage caps. The agent gets $100
-and trades freely. The only rules:
+Rules:
   1. Can't spend more margin than the wallet has
   2. Can't open contradictory positions (long + short same asset)
-  3. Stop-loss and take-profit on every position
+  3. Max 30% of balance on a single trade
+  4. Max 3x leverage
+  5. Stop-loss and take-profit on every position
+  6. Minimum $20 position size (no dust trades)
 """
 
 from __future__ import annotations
@@ -76,7 +78,7 @@ def calculate_position_size(conviction: float, suggested_size: float) -> float:
     capped = min(sized, max_margin * 3)  # assuming ~3x leverage
 
     # Floor: don't bother with tiny trades
-    if capped < 15:
+    if capped < 20:
         return 0.0
     return round(capped, 2)
 
@@ -99,8 +101,8 @@ def compute_stop_take(
 
 
 def clamp_leverage(proposed: int) -> int:
-    """Keep leverage in a sane range."""
-    return max(1, min(proposed, 5))
+    """Keep leverage in a sane range — max 3x to reduce impulsive losses."""
+    return max(1, min(proposed, 3))
 
 
 def get_available_margin() -> float:

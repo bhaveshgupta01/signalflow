@@ -236,6 +236,17 @@ def get_open_positions() -> list[Position]:
     return [_row_to_position(r) for r in rows]
 
 
+def get_last_trade_time() -> datetime | None:
+    """Return the opened_at of the most recent position, or None if no trades."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT opened_at FROM positions ORDER BY opened_at DESC LIMIT 1"
+    ).fetchone()
+    if row:
+        return datetime.fromisoformat(row["opened_at"])
+    return None
+
+
 def get_all_positions(limit: int = 50) -> list[Position]:
     conn = _get_conn()
     rows = conn.execute(

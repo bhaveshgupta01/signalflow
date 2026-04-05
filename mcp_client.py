@@ -1,7 +1,13 @@
-"""Boba MCP connection — bridges Gemini to Polymarket + Hyperliquid."""
+"""Boba MCP connection — bridges Gemini to Polymarket + Hyperliquid.
+
+Supports two connection modes:
+  1. stdio: via local `boba mcp` command (needs proxy running)
+  2. SSE: direct HTTP connection to Boba's remote MCP server (headless/server deployments)
+"""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -9,32 +15,72 @@ from contextlib import AsyncExitStack
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.sse import sse_client
 
 from config import BOBA_API_KEY
 
 logger = logging.getLogger(__name__)
 
-# Try to find the boba binary
-_BOBA_PATHS = [
-    os.path.expanduser("~/.npm/_npx/528a0913b9bfc11d/node_modules/.bin/boba"),
-    os.path.expanduser("~/.npm/_npx/*/node_modules/.bin/boba"),
-]
+# Boba MCP remote server
+BOBA_MCP_URL = "https://mcp-skunk.up.railway.app"
+BOBA_AUTH_URL = "https://krakend-skunk.up.railway.app/v2"
 
 
 def _find_boba_bin() -> str | None:
     """Find the boba binary on disk."""
     import glob
-    for pattern in _BOBA_PATHS:
+    patterns = [
+        os.path.expanduser("~/.npm/_npx/*/node_modules/.bin/boba"),
+        os.path.expanduser("~/.npm/_npx/*/node_modules/@tradeboba/cli-*/bin/boba"),
+    ]
+    for pattern in patterns:
         matches = glob.glob(pattern)
         if matches:
             return matches[0]
-    # Check if it's in PATH
     try:
         result = subprocess.run(["which", "boba"], capture_output=True, text=True)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
     except Exception:
         pass
+    return None
+
+
+async def _get_boba_access_token() -> str | None:
+    """Get access token from Boba config or auth endpoint."""
+    # Try reading from local config (written by `boba login`)
+    config_paths = [
+        os.path.expanduser("~/.config/boba-cli/config.json"),
+        os.path.expanduser("~/Library/Application Support/boba-cli/config.json"),
+    ]
+    for path in config_paths:
+        try:
+            with open(path) as f:
+                config = json.load(f)
+                token = config.get("tokens", {}).get("accessToken")
+                if token:
+                    return token
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            continue
+
+    # Try authenticating via the auth endpoint
+    agent_id = os.getenv("BOBA_AGENT_ID", "")
+    agent_secret = os.getenv("BOBA_AGENT_SECRET", BOBA_API_KEY)
+    if agent_id and agent_secret:
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{BOBA_AUTH_URL}/auth/agent",
+                    json={"agentId": agent_id, "secret": agent_secret},
+                    timeout=15.0,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("accessToken", data.get("access_token"))
+        except Exception as e:
+            logger.debug("Auth endpoint failed: %s", e)
+
     return None
 
 
@@ -47,14 +93,24 @@ class BobaClient:
         self._exit_stack: AsyncExitStack | None = None
 
     async def connect(self) -> None:
-        """Start the Boba MCP server and initialise the session."""
+        """Connect to Boba MCP — tries stdio first, falls back to SSE."""
+        try:
+            await self._connect_stdio()
+            return
+        except Exception as e:
+            logger.warning("Stdio connection failed (%s), trying SSE...", e)
+
+        await self._connect_sse()
+
+    async def _connect_stdio(self) -> None:
+        """Connect via local boba mcp command (requires proxy running)."""
         boba_bin = _find_boba_bin()
         if boba_bin and os.path.exists(boba_bin):
             command, args = boba_bin, ["mcp"]
-            logger.info("Using boba binary: %s", boba_bin)
         else:
             command, args = "npx", ["-y", "@tradeboba/cli@latest", "mcp"]
-            logger.info("Using npx to launch boba")
+
+        logger.info("Trying stdio connection: %s %s", command, " ".join(args))
 
         server_params = StdioServerParameters(
             command=command,
@@ -70,9 +126,34 @@ class BobaClient:
             ClientSession(read_stream, write_stream)
         )
         await self.session.initialize()
-        logger.info("Connected to Boba MCP server")
+        await self._discover_tools()
+        logger.info("Connected via stdio")
 
-        # Discover available tools
+    async def _connect_sse(self) -> None:
+        """Connect directly to Boba's remote MCP server via SSE."""
+        token = await _get_boba_access_token()
+        if not token:
+            raise RuntimeError(
+                "No Boba access token. Run 'boba login' or set BOBA_AGENT_ID + BOBA_AGENT_SECRET in .env"
+            )
+
+        logger.info("Connecting to Boba MCP via SSE: %s", BOBA_MCP_URL)
+
+        headers = {"Authorization": f"Bearer {token}"}
+
+        self._exit_stack = AsyncExitStack()
+        read_stream, write_stream = await self._exit_stack.enter_async_context(
+            sse_client(f"{BOBA_MCP_URL}/sse", headers=headers)
+        )
+        self.session = await self._exit_stack.enter_async_context(
+            ClientSession(read_stream, write_stream)
+        )
+        await self.session.initialize()
+        await self._discover_tools()
+        logger.info("Connected via SSE")
+
+    async def _discover_tools(self) -> None:
+        """Discover available tools from the MCP session."""
         tools_result = await self.session.list_tools()
         self._tools = [
             {
@@ -86,16 +167,13 @@ class BobaClient:
 
     @property
     def tools_for_claude(self) -> list[dict]:
-        """Return tool definitions formatted for the LLM messages API."""
         if self._tools is None:
             raise RuntimeError("Not connected — call connect() first")
         return self._tools
 
     async def call_tool(self, name: str, arguments: dict) -> str:
-        """Invoke a Boba MCP tool and return the text result."""
         if self.session is None:
             raise RuntimeError("Not connected — call connect() first")
-
         result = await self.session.call_tool(name, arguments)
         parts: list[str] = []
         for block in result.content:

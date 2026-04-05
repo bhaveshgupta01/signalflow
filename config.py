@@ -15,27 +15,27 @@ GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
 USE_VERTEX = os.getenv("USE_VERTEX", "true").lower() == "true"
 
 # ── Signal Detection ─────────────────────────────────────────────────────────
-MIN_SIGNAL_PRICE_CHANGE = 0.03  # 3% move = worth investigating (was 5%, now more aggressive)
-SIGNAL_DEDUP_MINUTES = 5        # very short dedup — re-evaluate markets every 5 min
+MIN_SIGNAL_PRICE_CHANGE = 0.05  # 5% move = worth investigating (raised from 3% to filter noise)
+SIGNAL_DEDUP_MINUTES = 15       # 15-min dedup — avoid re-triggering on the same market too fast
 MARKET_CATEGORIES = ["crypto", "bitcoin", "ethereum", "defi", "regulation", "SEC", "ETF", "solana"]
 
-# ── Risk Management (minimal — let the agent trade freely) ───────────────────
-# Only real constraint: don't spend more than you have
-MAX_SINGLE_POSITION_PCT = 0.50   # max 50% of current balance on one trade
-DEFAULT_STOP_LOSS_PCT = 0.04     # 4% stop-loss (tighter = close losers faster)
-DEFAULT_TAKE_PROFIT_PCT = 0.10   # 10% take-profit (capture gains in hours not days)
+# ── Risk Management (disciplined — protect the wallet) ───────────────────────
+MAX_SINGLE_POSITION_PCT = 0.30   # max 30% of balance on one trade (was 50%)
+DEFAULT_STOP_LOSS_PCT = 0.03     # 3% stop-loss (tighter = cut losers faster)
+DEFAULT_TAKE_PROFIT_PCT = 0.08   # 8% take-profit (realistic target for 4h window)
 MAX_POSITION_AGE_HOURS = 4       # auto-close any position older than 4 hours
 
 # ── Agent ────────────────────────────────────────────────────────────────────
 GEMINI_MODEL = "gemini-2.5-flash"
-CONVICTION_THRESHOLD = 0.55       # lower bar = more trades (was 0.7)
+CONVICTION_THRESHOLD = 0.72       # higher bar = fewer but better trades (raised from 0.55)
+TRADE_COOLDOWN_MINUTES = 10       # minimum wait between opening new positions
 
-# ── Trigger Intervals (fast — act on signals quickly) ────────────────────────
-POLYMARKET_TRIGGER_INTERVAL = 45     # scan every 45s
-KOL_TRIGGER_INTERVAL = 60           # check whales every 60s
-FUNDING_TRIGGER_INTERVAL = 90       # funding rates every 90s
-TOKEN_DISCOVERY_INTERVAL = 120      # trending tokens every 2 min
-CROSS_CHAIN_INTERVAL = 180          # cross-chain arb every 3 min
+# ── Trigger Intervals (slower = more deliberate, less noise) ─────────────────
+POLYMARKET_TRIGGER_INTERVAL = 90     # scan every 90s (was 45s)
+KOL_TRIGGER_INTERVAL = 120          # check whales every 2 min (was 60s)
+FUNDING_TRIGGER_INTERVAL = 180      # funding rates every 3 min (was 90s)
+TOKEN_DISCOVERY_INTERVAL = 240      # trending tokens every 4 min (was 2 min)
+CROSS_CHAIN_INTERVAL = 300          # cross-chain arb every 5 min (was 3 min)
 PORTFOLIO_TRIGGER_INTERVAL = 300    # wallet sync every 5 min
 
 # ── Funding / Cross-Chain Thresholds ─────────────────────────────────────────
@@ -44,8 +44,8 @@ CROSS_CHAIN_THRESHOLD = 0.003       # 0.3% price diff (more aggressive)
 
 # ── KOL Tracking ─────────────────────────────────────────────────────────────
 KOL_POLL_ENABLED = True
-KOL_MIN_TRADE_USD = 100         # Boba KOLs are Solana memecoin traders, small sizes
-KOL_SIGNAL_BOOST = 0.15         # +15% conviction when KOL aligns
+KOL_MIN_TRADE_USD = 500         # only track meaningful trades >$500 (was $100)
+KOL_SIGNAL_BOOST = 0.10         # +10% conviction when KOL aligns (was 15%, toned down)
 KOL_DEDUP_MINUTES = 30          # shorter dedup
 
 # ── Boba MCP ─────────────────────────────────────────────────────────────────

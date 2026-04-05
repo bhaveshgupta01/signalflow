@@ -1,0 +1,55 @@
+version: "3.9"
+
+services:
+  boba-proxy:
+    image: node:20-slim
+    container_name: signalflow-boba
+    env_file: .env
+    command: >
+      sh -c "npm install -g @tradeboba/cli@latest &&
+             script -q /dev/null boba proxy --port 3456"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3456/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  agent:
+    build: .
+    container_name: signalflow-agent
+    env_file: .env
+    volumes:
+      - db-data:/app/data
+    environment:
+      - SIGNALFLOW_DB_PATH=/app/data/signalflow.db
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    command: python runner.py
+    depends_on:
+      boba-proxy:
+        condition: service_healthy
+
+  dashboard:
+    build: .
+    container_name: signalflow-dashboard
+    env_file: .env
+    ports:
+      - "8501:8501"
+    volumes:
+      - db-data:/app/data
+    environment:
+      - SIGNALFLOW_DB_PATH=/app/data/signalflow.db
+    restart: unless-stopped
+    command: >
+      streamlit run dashboard.py
+      --server.port=8501
+      --server.address=0.0.0.0
+      --server.headless=true
+      --browser.gatherUsageStats=false
+    depends_on:
+      - agent
+
+volumes:
+  db-data:

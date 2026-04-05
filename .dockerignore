@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+.env
+signalflow.db
+signalflow.db-wal
+signalflow.db-shm
+.git
+.venv
+*.egg-info
+node_modules

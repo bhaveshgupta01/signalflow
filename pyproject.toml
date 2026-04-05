@@ -1,0 +1,23 @@
+[project]
+name = "signalflow"
+version = "0.1.0"
+description = "AI-powered event-driven trading agent — Polymarket signals → Hyperliquid perps via Boba MCP"
+requires-python = ">=3.11"
+dependencies = [
+    "google-genai>=1.0.0",
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",
+    "streamlit>=1.35.0",
+    "streamlit-autorefresh>=1.0.1",
+    "python-dotenv>=1.0.0",
+    "pandas>=2.0.0",
+    "plotly>=5.0.0",
+    "gunicorn>=21.2.0",
+]
+
+[project.scripts]
+signalflow = "runner:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

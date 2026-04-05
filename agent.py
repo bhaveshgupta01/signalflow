@@ -24,10 +24,8 @@ from google.genai import types
 from config import (
     GEMINI_MODEL, CONVICTION_THRESHOLD, KOL_SIGNAL_BOOST,
     PAPER_WALLET_STARTING_BALANCE, MAX_POSITION_AGE_HOURS,
-    TRADE_COOLDOWN_MINUTES,
 )
 from db import (
-    get_last_trade_time,
     get_open_positions,
     get_stats,
     save_analysis,
@@ -216,18 +214,6 @@ async def run_cycle(client: genai.Client, boba: BobaClient) -> AgentDecision:
     kol_signals = await detect_kol_signals(boba)
     logger.info("Detected %d KOL signals", len(kol_signals))
 
-    # ── Cooldown check: don't trade too rapidly ─────────────────────────
-    last_trade = get_last_trade_time()
-    in_cooldown = False
-    if last_trade:
-        minutes_since = (datetime.utcnow() - last_trade).total_seconds() / 60
-        if minutes_since < TRADE_COOLDOWN_MINUTES:
-            in_cooldown = True
-            logger.info(
-                "Trade cooldown: %.0f min since last trade (need %d min)",
-                minutes_since, TRADE_COOLDOWN_MINUTES,
-            )
-
     # ── Phase 2 & 3 & 4: Analyze, Risk-check, Execute ────────────────────
     for signal in signals:
         analysis = await _analyze_signal(client, boba, signal)
@@ -257,14 +243,6 @@ async def run_cycle(client: genai.Client, boba: BobaClient) -> AgentDecision:
                 "Low conviction (%.2f < %.2f) for %s — skipping",
                 analysis.conviction_score, CONVICTION_THRESHOLD,
                 signal.market_question[:50],
-            )
-            continue
-
-        # Cooldown gate: analyze freely, but don't execute during cooldown
-        if in_cooldown:
-            logger.info(
-                "Cooldown active — skipping execution for %s (conviction=%.2f)",
-                analysis.suggested_asset, analysis.conviction_score,
             )
             continue
 

@@ -27,15 +27,14 @@ MAX_POSITION_AGE_HOURS = 4       # auto-close any position older than 4 hours
 
 # ── Agent ────────────────────────────────────────────────────────────────────
 GEMINI_MODEL = "gemini-2.5-flash"
-CONVICTION_THRESHOLD = 0.72       # higher bar = fewer but better trades (raised from 0.55)
-TRADE_COOLDOWN_MINUTES = 10       # minimum wait between opening new positions
+CONVICTION_THRESHOLD = 0.66       # moderate bar — skip weak signals, trade decent ones
 
-# ── Trigger Intervals (slower = more deliberate, less noise) ─────────────────
-POLYMARKET_TRIGGER_INTERVAL = 90     # scan every 90s (was 45s)
-KOL_TRIGGER_INTERVAL = 120          # check whales every 2 min (was 60s)
-FUNDING_TRIGGER_INTERVAL = 180      # funding rates every 3 min (was 90s)
-TOKEN_DISCOVERY_INTERVAL = 240      # trending tokens every 4 min (was 2 min)
-CROSS_CHAIN_INTERVAL = 300          # cross-chain arb every 5 min (was 3 min)
+# ── Trigger Intervals (fast — event-driven, scan aggressively) ───────────────
+POLYMARKET_TRIGGER_INTERVAL = 45     # scan every 45s
+KOL_TRIGGER_INTERVAL = 60           # check whales every 60s
+FUNDING_TRIGGER_INTERVAL = 90       # funding rates every 90s
+TOKEN_DISCOVERY_INTERVAL = 120      # trending tokens every 2 min
+CROSS_CHAIN_INTERVAL = 180          # cross-chain arb every 3 min
 PORTFOLIO_TRIGGER_INTERVAL = 300    # wallet sync every 5 min
 
 # ── Funding / Cross-Chain Thresholds ─────────────────────────────────────────

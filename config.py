@@ -19,11 +19,12 @@ MIN_SIGNAL_PRICE_CHANGE = 0.05  # 5% move = worth investigating (raised from 3% 
 SIGNAL_DEDUP_MINUTES = 15       # 15-min dedup — avoid re-triggering on the same market too fast
 MARKET_CATEGORIES = ["crypto", "bitcoin", "ethereum", "defi", "regulation", "SEC", "ETF", "solana"]
 
-# ── Risk Management (disciplined — protect the wallet) ───────────────────────
-MAX_SINGLE_POSITION_PCT = 0.30   # max 30% of balance on one trade (was 50%)
-DEFAULT_STOP_LOSS_PCT = 0.03     # 3% stop-loss (tighter = cut losers faster)
-DEFAULT_TAKE_PROFIT_PCT = 0.08   # 8% take-profit (realistic target for 4h window)
+# ── Risk Management ──────────────────────────────────────────────────────────
+MAX_SINGLE_POSITION_PCT = 0.25   # max 25% of balance on one trade
+DEFAULT_STOP_LOSS_PCT = 0.05     # 5% stop-loss (wider = fewer false stop-outs that kill profits)
+DEFAULT_TAKE_PROFIT_PCT = 0.10   # 10% take-profit
 MAX_POSITION_AGE_HOURS = 4       # auto-close any position older than 4 hours
+MIN_FLIP_INTERVAL_MINUTES = 30   # don't flip a position within 30 min of opening it
 
 # ── Agent ────────────────────────────────────────────────────────────────────
 GEMINI_MODEL = "gemini-2.5-flash"

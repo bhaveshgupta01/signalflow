@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import logging
 
+from datetime import datetime
+
 from config import (
     DEFAULT_STOP_LOSS_PCT,
     DEFAULT_TAKE_PROFIT_PCT,
     PAPER_WALLET_STARTING_BALANCE,
     MAX_CONCURRENT_POSITIONS,
+    MIN_FLIP_INTERVAL_MINUTES,
 )
 from db import get_open_positions, get_stats
 from models import Direction
@@ -54,12 +57,16 @@ def can_open_position(proposed_size: float, proposed_leverage: int = 1) -> tuple
 
 
 def can_open_position_for_asset(asset: str, direction: Direction) -> tuple[bool, str]:
-    """Same direction = blocked. Opposite = flip (close old first)."""
+    """Same direction = blocked. Opposite = flip, but only if position is old enough."""
     for p in get_open_positions():
         if p.asset.upper() == asset.upper():
             if p.direction == direction:
                 return False, f"Already {direction.value} on {asset}"
             else:
+                # Don't flip too quickly — kills profits from spread costs
+                age_min = (datetime.utcnow() - p.opened_at).total_seconds() / 60
+                if age_min < MIN_FLIP_INTERVAL_MINUTES:
+                    return False, f"Won't flip {asset} yet ({age_min:.0f}m old, need {MIN_FLIP_INTERVAL_MINUTES}m)"
                 return False, f"FLIP:{p.id}"
     return True, "OK"
 

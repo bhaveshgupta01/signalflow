@@ -1,10 +1,16 @@
-"""SQLite persistence layer for SignalFlow."""
+"""Supabase persistence layer for SignalFlow.
+
+Replaces the original SQLite layer. Same function signatures — all callers
+(agent.py, risk.py, signals.py, kol_tracker.py, runner.py, dashboard pages)
+work without changes.
+"""
 
 from __future__ import annotations
 
-import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+from supabase import create_client, Client
 
 from models import (
     AgentDecision,
@@ -17,425 +23,373 @@ from models import (
     Signal,
     WalletSnapshot,
 )
-from config import DB_PATH
+from config import SUPABASE_URL, SUPABASE_SERVICE_KEY
 
-_conn: Optional[sqlite3.Connection] = None
+_client: Optional[Client] = None
 
 
-def _get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-    return _conn
+def _get_client() -> Client:
+    global _client
+    if _client is None:
+        _client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    return _client
+
+
+def _parse_dt(val: str | None) -> datetime | None:
+    """Parse a Postgres TIMESTAMPTZ string into a datetime."""
+    if val is None:
+        return None
+    return datetime.fromisoformat(val)
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _cutoff_iso(minutes: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
 
 def init_db() -> None:
-    conn = _get_conn()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS signals (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            market_id       TEXT NOT NULL,
-            market_question TEXT NOT NULL,
-            current_price   REAL NOT NULL,
-            price_change_pct REAL NOT NULL,
-            timeframe_minutes INTEGER NOT NULL,
-            category        TEXT DEFAULT '',
-            detected_at     TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS analyses (
-            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-            signal_id           INTEGER NOT NULL REFERENCES signals(id),
-            reasoning           TEXT NOT NULL,
-            conviction_score    REAL NOT NULL,
-            suggested_direction TEXT NOT NULL,
-            suggested_asset     TEXT NOT NULL,
-            suggested_size_usd  REAL NOT NULL,
-            risk_notes          TEXT DEFAULT '',
-            created_at          TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS positions (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            analysis_id   INTEGER NOT NULL REFERENCES analyses(id),
-            asset         TEXT NOT NULL,
-            direction     TEXT NOT NULL,
-            entry_price   REAL NOT NULL,
-            size_usd      REAL NOT NULL,
-            leverage      INTEGER NOT NULL,
-            stop_loss     REAL NOT NULL,
-            take_profit   REAL NOT NULL,
-            status        TEXT NOT NULL DEFAULT 'open',
-            pnl           REAL DEFAULT 0.0,
-            opened_at     TEXT NOT NULL,
-            closed_at     TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS agent_decisions (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            cycle_id          TEXT NOT NULL,
-            signals_detected  INTEGER DEFAULT 0,
-            analyses_produced INTEGER DEFAULT 0,
-            trades_executed   INTEGER DEFAULT 0,
-            reasoning_summary TEXT DEFAULT '',
-            timestamp         TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS kol_signals (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            kol_name        TEXT NOT NULL,
-            wallet_address  TEXT NOT NULL,
-            asset           TEXT NOT NULL,
-            direction       TEXT NOT NULL,
-            trade_size_usd  REAL NOT NULL,
-            detected_at     TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS wallet_snapshots (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            balance         REAL NOT NULL,
-            total_pnl       REAL NOT NULL,
-            open_positions  INTEGER NOT NULL,
-            timestamp       TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS position_snapshots (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            position_id     INTEGER NOT NULL REFERENCES positions(id),
-            asset           TEXT NOT NULL,
-            current_price   REAL NOT NULL,
-            unrealized_pnl  REAL NOT NULL,
-            timestamp       TEXT NOT NULL
-        );
-
-
-        CREATE INDEX IF NOT EXISTS idx_analyses_signal_id ON analyses(signal_id);
-        CREATE INDEX IF NOT EXISTS idx_positions_analysis_id ON positions(analysis_id);
-        CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
-        CREATE INDEX IF NOT EXISTS idx_position_snapshots_position_id ON position_snapshots(position_id);
-        CREATE INDEX IF NOT EXISTS idx_wallet_snapshots_timestamp ON wallet_snapshots(timestamp);
-        CREATE INDEX IF NOT EXISTS idx_signals_detected_at ON signals(detected_at);
-        CREATE INDEX IF NOT EXISTS idx_kol_signals_detected_at ON kol_signals(detected_at);
-    """)
-    conn.commit()
+    """No-op — schema is managed via Supabase migrations."""
+    _get_client()  # validate connection on startup
 
 
 # ── Signals ───────────────────────────────────────────────────────────────────
 
 def save_signal(s: Signal) -> Signal:
-    conn = _get_conn()
-    cur = conn.execute(
-        """INSERT INTO signals
-           (market_id, market_question, current_price, price_change_pct,
-            timeframe_minutes, category, detected_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (s.market_id, s.market_question, s.current_price, s.price_change_pct,
-         s.timeframe_minutes, s.category, s.detected_at.isoformat()),
-    )
-    conn.commit()
-    s.id = cur.lastrowid
+    client = _get_client()
+    data = {
+        "market_id": s.market_id,
+        "market_question": s.market_question,
+        "current_price": s.current_price,
+        "price_change_pct": s.price_change_pct,
+        "timeframe_minutes": s.timeframe_minutes,
+        "category": s.category,
+        "detected_at": s.detected_at.isoformat(),
+    }
+    result = client.table("signals").insert(data).execute()
+    s.id = result.data[0]["id"]
     return s
 
 
 def get_recent_signals(minutes: int = 30) -> list[Signal]:
-    conn = _get_conn()
-    cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
-    rows = conn.execute(
-        "SELECT * FROM signals WHERE detected_at >= ? ORDER BY detected_at DESC", (cutoff,)
-    ).fetchall()
-    return [_row_to_signal(r) for r in rows]
+    client = _get_client()
+    cutoff = _cutoff_iso(minutes)
+    result = (
+        client.table("signals")
+        .select("*")
+        .gte("detected_at", cutoff)
+        .order("detected_at", desc=True)
+        .execute()
+    )
+    return [_row_to_signal(r) for r in result.data]
 
 
 def get_signals_for_market(market_id: str, minutes: int = 30) -> list[Signal]:
-    conn = _get_conn()
-    cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
-    rows = conn.execute(
-        "SELECT * FROM signals WHERE market_id = ? AND detected_at >= ? ORDER BY detected_at DESC",
-        (market_id, cutoff),
-    ).fetchall()
-    return [_row_to_signal(r) for r in rows]
+    client = _get_client()
+    cutoff = _cutoff_iso(minutes)
+    result = (
+        client.table("signals")
+        .select("*")
+        .eq("market_id", market_id)
+        .gte("detected_at", cutoff)
+        .order("detected_at", desc=True)
+        .execute()
+    )
+    return [_row_to_signal(r) for r in result.data]
 
 
 # ── Analyses ──────────────────────────────────────────────────────────────────
 
 def save_analysis(a: Analysis) -> Analysis:
-    conn = _get_conn()
-    cur = conn.execute(
-        """INSERT INTO analyses
-           (signal_id, reasoning, conviction_score, suggested_direction,
-            suggested_asset, suggested_size_usd, risk_notes, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (a.signal_id, a.reasoning, a.conviction_score, a.suggested_direction.value,
-         a.suggested_asset, a.suggested_size_usd, a.risk_notes, a.created_at.isoformat()),
-    )
-    conn.commit()
-    a.id = cur.lastrowid
+    client = _get_client()
+    data = {
+        "signal_id": a.signal_id,
+        "reasoning": a.reasoning,
+        "conviction_score": a.conviction_score,
+        "suggested_direction": a.suggested_direction.value,
+        "suggested_asset": a.suggested_asset,
+        "suggested_size_usd": a.suggested_size_usd,
+        "risk_notes": a.risk_notes,
+        "created_at": a.created_at.isoformat(),
+    }
+    result = client.table("analyses").insert(data).execute()
+    a.id = result.data[0]["id"]
     return a
 
 
 def get_recent_analyses(limit: int = 20) -> list[Analysis]:
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM analyses ORDER BY created_at DESC LIMIT ?", (limit,)
-    ).fetchall()
-    return [_row_to_analysis(r) for r in rows]
+    client = _get_client()
+    result = (
+        client.table("analyses")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return [_row_to_analysis(r) for r in result.data]
 
 
 # ── Positions ─────────────────────────────────────────────────────────────────
 
 def save_position(p: Position) -> Position:
-    conn = _get_conn()
-    cur = conn.execute(
-        """INSERT INTO positions
-           (analysis_id, asset, direction, entry_price, size_usd, leverage,
-            stop_loss, take_profit, status, pnl, opened_at, closed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (p.analysis_id, p.asset, p.direction.value, p.entry_price, p.size_usd,
-         p.leverage, p.stop_loss, p.take_profit, p.status.value, p.pnl,
-         p.opened_at.isoformat(), p.closed_at.isoformat() if p.closed_at else None),
-    )
-    conn.commit()
-    p.id = cur.lastrowid
+    client = _get_client()
+    data = {
+        "analysis_id": p.analysis_id,
+        "asset": p.asset,
+        "direction": p.direction.value,
+        "entry_price": p.entry_price,
+        "size_usd": p.size_usd,
+        "leverage": p.leverage,
+        "stop_loss": p.stop_loss,
+        "take_profit": p.take_profit,
+        "status": p.status.value,
+        "pnl": p.pnl,
+        "opened_at": p.opened_at.isoformat(),
+        "closed_at": p.closed_at.isoformat() if p.closed_at else None,
+    }
+    result = client.table("positions").insert(data).execute()
+    p.id = result.data[0]["id"]
     return p
 
 
 def update_position(position_id: int, *, status: Optional[PositionStatus] = None,
                      pnl: Optional[float] = None, closed_at: Optional[datetime] = None,
                      stop_loss: Optional[float] = None) -> None:
-    conn = _get_conn()
-    updates: list[str] = []
-    params: list = []
+    client = _get_client()
+    updates: dict = {}
     if status is not None:
-        updates.append("status = ?")
-        params.append(status.value)
+        updates["status"] = status.value
     if pnl is not None:
-        updates.append("pnl = ?")
-        params.append(pnl)
+        updates["pnl"] = pnl
     if closed_at is not None:
-        updates.append("closed_at = ?")
-        params.append(closed_at.isoformat())
+        updates["closed_at"] = closed_at.isoformat()
     if stop_loss is not None:
-        updates.append("stop_loss = ?")
-        params.append(stop_loss)
+        updates["stop_loss"] = stop_loss
     if not updates:
         return
-    params.append(position_id)
-    conn.execute(f"UPDATE positions SET {', '.join(updates)} WHERE id = ?", params)
-    conn.commit()
+    client.table("positions").update(updates).eq("id", position_id).execute()
 
 
 def get_open_positions() -> list[Position]:
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM positions WHERE status = 'open' ORDER BY opened_at DESC"
-    ).fetchall()
-    return [_row_to_position(r) for r in rows]
+    client = _get_client()
+    result = (
+        client.table("positions")
+        .select("*")
+        .eq("status", "open")
+        .order("opened_at", desc=True)
+        .execute()
+    )
+    return [_row_to_position(r) for r in result.data]
 
 
 def get_last_trade_time() -> datetime | None:
     """Return the opened_at of the most recent position, or None if no trades."""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT opened_at FROM positions ORDER BY opened_at DESC LIMIT 1"
-    ).fetchone()
-    if row:
-        return datetime.fromisoformat(row["opened_at"])
+    client = _get_client()
+    result = (
+        client.table("positions")
+        .select("opened_at")
+        .order("opened_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if result.data:
+        return _parse_dt(result.data[0]["opened_at"])
     return None
 
 
 def get_all_positions(limit: int = 50) -> list[Position]:
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM positions ORDER BY opened_at DESC LIMIT ?", (limit,)
-    ).fetchall()
-    return [_row_to_position(r) for r in rows]
+    client = _get_client()
+    result = (
+        client.table("positions")
+        .select("*")
+        .order("opened_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return [_row_to_position(r) for r in result.data]
 
 
 # ── Agent Decisions ───────────────────────────────────────────────────────────
 
 def save_decision(d: AgentDecision) -> AgentDecision:
-    conn = _get_conn()
-    cur = conn.execute(
-        """INSERT INTO agent_decisions
-           (cycle_id, signals_detected, analyses_produced, trades_executed,
-            reasoning_summary, timestamp)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (d.cycle_id, d.signals_detected, d.analyses_produced, d.trades_executed,
-         d.reasoning_summary, d.timestamp.isoformat()),
-    )
-    conn.commit()
-    d.id = cur.lastrowid
+    client = _get_client()
+    data = {
+        "cycle_id": d.cycle_id,
+        "signals_detected": d.signals_detected,
+        "analyses_produced": d.analyses_produced,
+        "trades_executed": d.trades_executed,
+        "reasoning_summary": d.reasoning_summary,
+        "timestamp": d.timestamp.isoformat(),
+    }
+    result = client.table("agent_decisions").insert(data).execute()
+    d.id = result.data[0]["id"]
     return d
 
 
 def get_recent_decisions(limit: int = 20) -> list[AgentDecision]:
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM agent_decisions ORDER BY timestamp DESC LIMIT ?", (limit,)
-    ).fetchall()
-    return [_row_to_decision(r) for r in rows]
+    client = _get_client()
+    result = (
+        client.table("agent_decisions")
+        .select("*")
+        .order("timestamp", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return [_row_to_decision(r) for r in result.data]
 
 
 # ── KOL Signals ──────────────────────────────────────────────────────────────
 
 def save_kol_signal(k: KolSignal) -> KolSignal:
-    conn = _get_conn()
-    cur = conn.execute(
-        """INSERT INTO kol_signals
-           (kol_name, wallet_address, asset, direction, trade_size_usd, detected_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (k.kol_name, k.wallet_address, k.asset, k.direction.value,
-         k.trade_size_usd, k.detected_at.isoformat()),
-    )
-    conn.commit()
-    k.id = cur.lastrowid
+    client = _get_client()
+    data = {
+        "kol_name": k.kol_name,
+        "wallet_address": k.wallet_address,
+        "asset": k.asset,
+        "direction": k.direction.value,
+        "trade_size_usd": k.trade_size_usd,
+        "detected_at": k.detected_at.isoformat(),
+    }
+    result = client.table("kol_signals").insert(data).execute()
+    k.id = result.data[0]["id"]
     return k
 
 
 def get_recent_kol_signals(minutes: int = 60) -> list[KolSignal]:
-    conn = _get_conn()
-    cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
-    rows = conn.execute(
-        "SELECT * FROM kol_signals WHERE detected_at >= ? ORDER BY detected_at DESC",
-        (cutoff,),
-    ).fetchall()
-    return [_row_to_kol_signal(r) for r in rows]
+    client = _get_client()
+    cutoff = _cutoff_iso(minutes)
+    result = (
+        client.table("kol_signals")
+        .select("*")
+        .gte("detected_at", cutoff)
+        .order("detected_at", desc=True)
+        .execute()
+    )
+    return [_row_to_kol_signal(r) for r in result.data]
 
 
 def get_kol_signals_for_asset(asset: str, minutes: int = 60) -> list[KolSignal]:
-    conn = _get_conn()
-    cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
-    rows = conn.execute(
-        "SELECT * FROM kol_signals WHERE UPPER(asset) = ? AND detected_at >= ? ORDER BY detected_at DESC",
-        (asset.upper(), cutoff),
-    ).fetchall()
-    return [_row_to_kol_signal(r) for r in rows]
+    client = _get_client()
+    cutoff = _cutoff_iso(minutes)
+    result = (
+        client.table("kol_signals")
+        .select("*")
+        .ilike("asset", asset)
+        .gte("detected_at", cutoff)
+        .order("detected_at", desc=True)
+        .execute()
+    )
+    return [_row_to_kol_signal(r) for r in result.data]
 
 
 def get_all_kol_signals(limit: int = 50) -> list[KolSignal]:
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM kol_signals ORDER BY detected_at DESC LIMIT ?", (limit,)
-    ).fetchall()
-    return [_row_to_kol_signal(r) for r in rows]
+    client = _get_client()
+    result = (
+        client.table("kol_signals")
+        .select("*")
+        .order("detected_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return [_row_to_kol_signal(r) for r in result.data]
 
 
 # ── Position Snapshots ────────────────────────────────────────────────────────
 
 def save_position_snapshot(ps: PositionSnapshot) -> PositionSnapshot:
-    conn = _get_conn()
-    cur = conn.execute(
-        """INSERT INTO position_snapshots
-           (position_id, asset, current_price, unrealized_pnl, timestamp)
-           VALUES (?, ?, ?, ?, ?)""",
-        (ps.position_id, ps.asset, ps.current_price, ps.unrealized_pnl,
-         ps.timestamp.isoformat()),
-    )
-    conn.commit()
-    ps.id = cur.lastrowid
+    client = _get_client()
+    data = {
+        "position_id": ps.position_id,
+        "asset": ps.asset,
+        "current_price": ps.current_price,
+        "unrealized_pnl": ps.unrealized_pnl,
+        "timestamp": ps.timestamp.isoformat(),
+    }
+    result = client.table("position_snapshots").insert(data).execute()
+    ps.id = result.data[0]["id"]
     return ps
 
 
 def get_position_snapshots(position_id: int | None = None, minutes: int = 1440) -> list[PositionSnapshot]:
-    conn = _get_conn()
-    cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+    client = _get_client()
+    cutoff = _cutoff_iso(minutes)
+    query = client.table("position_snapshots").select("*").gte("timestamp", cutoff)
     if position_id:
-        rows = conn.execute(
-            "SELECT * FROM position_snapshots WHERE position_id = ? AND timestamp >= ? ORDER BY timestamp",
-            (position_id, cutoff),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM position_snapshots WHERE timestamp >= ? ORDER BY timestamp",
-            (cutoff,),
-        ).fetchall()
-    return [_row_to_position_snapshot(r) for r in rows]
+        query = query.eq("position_id", position_id)
+    result = query.order("timestamp").execute()
+    return [_row_to_position_snapshot(r) for r in result.data]
 
 
 def get_asset_pnl_history(minutes: int = 1440) -> dict[str, list[tuple]]:
     """Return {asset: [(timestamp, sum_pnl), ...]} for charting."""
-    conn = _get_conn()
-    cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
-    rows = conn.execute(
-        """SELECT asset, timestamp, SUM(unrealized_pnl) as total_pnl
-           FROM position_snapshots
-           WHERE timestamp >= ?
-           GROUP BY asset, timestamp
-           ORDER BY timestamp""",
-        (cutoff,),
-    ).fetchall()
-    result: dict[str, list[tuple]] = {}
-    for r in rows:
+    client = _get_client()
+    cutoff = _cutoff_iso(minutes)
+    result = client.rpc("get_asset_pnl_history", {"cutoff_ts": cutoff}).execute()
+    output: dict[str, list[tuple]] = {}
+    for r in result.data:
         asset = r["asset"]
-        if asset not in result:
-            result[asset] = []
-        result[asset].append((datetime.fromisoformat(r["timestamp"]), r["total_pnl"]))
-    return result
+        if asset not in output:
+            output[asset] = []
+        output[asset].append((_parse_dt(r["ts"]), r["total_pnl"]))
+    return output
 
 
 # ── Wallet Snapshots ─────────────────────────────────────────────────────────
 
 def save_wallet_snapshot(ws: WalletSnapshot) -> WalletSnapshot:
-    conn = _get_conn()
-    cur = conn.execute(
-        """INSERT INTO wallet_snapshots
-           (balance, total_pnl, open_positions, timestamp)
-           VALUES (?, ?, ?, ?)""",
-        (ws.balance, ws.total_pnl, ws.open_positions, ws.timestamp.isoformat()),
-    )
-    conn.commit()
-    ws.id = cur.lastrowid
+    client = _get_client()
+    data = {
+        "balance": ws.balance,
+        "total_pnl": ws.total_pnl,
+        "open_positions": ws.open_positions,
+        "timestamp": ws.timestamp.isoformat(),
+    }
+    result = client.table("wallet_snapshots").insert(data).execute()
+    ws.id = result.data[0]["id"]
     return ws
 
 
 def get_wallet_history(limit: int = 100) -> list[WalletSnapshot]:
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM wallet_snapshots ORDER BY timestamp DESC LIMIT ?", (limit,)
-    ).fetchall()
-    return [_row_to_wallet_snapshot(r) for r in rows]
+    client = _get_client()
+    result = (
+        client.table("wallet_snapshots")
+        .select("*")
+        .order("timestamp", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return [_row_to_wallet_snapshot(r) for r in result.data]
 
 
 # ── Aggregate Stats ───────────────────────────────────────────────────────────
 
 def get_stats() -> dict:
-    conn = _get_conn()
-    total = conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
-    wins = conn.execute("SELECT COUNT(*) FROM positions WHERE pnl > 0 AND status != 'open'").fetchone()[0]
-    closed = conn.execute("SELECT COUNT(*) FROM positions WHERE status != 'open'").fetchone()[0]
-    total_pnl = conn.execute("SELECT COALESCE(SUM(pnl), 0) FROM positions").fetchone()[0]
-    open_exposure = conn.execute(
-        "SELECT COALESCE(SUM(size_usd), 0) FROM positions WHERE status = 'open'"
-    ).fetchone()[0]
-    return {
-        "total_trades": total,
-        "closed_trades": closed,
-        "wins": wins,
-        "win_rate": (wins / closed * 100) if closed > 0 else 0.0,
-        "total_pnl": total_pnl,
-        "open_exposure": open_exposure,
-    }
+    client = _get_client()
+    result = client.rpc("get_trading_stats").execute()
+    return result.data
 
 
 # ── Trade Events (for chart annotations) ────────────────────────────────────
 
 def get_trade_events(minutes: int = 999999) -> list[dict]:
     """Return trade open/close events for chart annotations."""
-    conn = _get_conn()
-    cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+    client = _get_client()
+    cutoff = _cutoff_iso(minutes)
     events = []
 
     # Open events
-    rows = conn.execute(
-        "SELECT id, asset, direction, entry_price, size_usd, leverage, opened_at "
-        "FROM positions WHERE opened_at >= ? ORDER BY opened_at",
-        (cutoff,),
-    ).fetchall()
-    for r in rows:
+    open_result = (
+        client.table("positions")
+        .select("id, asset, direction, entry_price, size_usd, leverage, opened_at")
+        .gte("opened_at", cutoff)
+        .order("opened_at")
+        .execute()
+    )
+    for r in open_result.data:
         events.append({
             "type": "open",
             "position_id": r["id"],
@@ -444,16 +398,19 @@ def get_trade_events(minutes: int = 999999) -> list[dict]:
             "price": r["entry_price"],
             "size_usd": r["size_usd"],
             "leverage": r["leverage"],
-            "timestamp": datetime.fromisoformat(r["opened_at"]),
+            "timestamp": _parse_dt(r["opened_at"]),
         })
 
     # Close events
-    rows = conn.execute(
-        "SELECT id, asset, direction, entry_price, size_usd, pnl, status, closed_at "
-        "FROM positions WHERE closed_at IS NOT NULL AND closed_at >= ? ORDER BY closed_at",
-        (cutoff,),
-    ).fetchall()
-    for r in rows:
+    close_result = (
+        client.table("positions")
+        .select("id, asset, direction, entry_price, size_usd, pnl, status, closed_at")
+        .not_.is_("closed_at", "null")
+        .gte("closed_at", cutoff)
+        .order("closed_at")
+        .execute()
+    )
+    for r in close_result.data:
         events.append({
             "type": "close",
             "position_id": r["id"],
@@ -463,7 +420,7 @@ def get_trade_events(minutes: int = 999999) -> list[dict]:
             "size_usd": r["size_usd"],
             "pnl": r["pnl"],
             "status": r["status"],
-            "timestamp": datetime.fromisoformat(r["closed_at"]),
+            "timestamp": _parse_dt(r["closed_at"]),
         })
 
     return sorted(events, key=lambda e: e["timestamp"])
@@ -471,66 +428,67 @@ def get_trade_events(minutes: int = 999999) -> list[dict]:
 
 # ── Row converters ────────────────────────────────────────────────────────────
 
-def _row_to_signal(r: sqlite3.Row) -> Signal:
+def _row_to_signal(r: dict) -> Signal:
     return Signal(
         id=r["id"], market_id=r["market_id"], market_question=r["market_question"],
         current_price=r["current_price"], price_change_pct=r["price_change_pct"],
-        timeframe_minutes=r["timeframe_minutes"], category=r["category"],
-        detected_at=datetime.fromisoformat(r["detected_at"]),
+        timeframe_minutes=r["timeframe_minutes"], category=r["category"] or "",
+        detected_at=_parse_dt(r["detected_at"]),
     )
 
 
-def _row_to_analysis(r: sqlite3.Row) -> Analysis:
+def _row_to_analysis(r: dict) -> Analysis:
     return Analysis(
         id=r["id"], signal_id=r["signal_id"], reasoning=r["reasoning"],
         conviction_score=r["conviction_score"],
         suggested_direction=Direction(r["suggested_direction"]),
         suggested_asset=r["suggested_asset"], suggested_size_usd=r["suggested_size_usd"],
-        risk_notes=r["risk_notes"], created_at=datetime.fromisoformat(r["created_at"]),
+        risk_notes=r["risk_notes"] or "", created_at=_parse_dt(r["created_at"]),
     )
 
 
-def _row_to_position(r: sqlite3.Row) -> Position:
+def _row_to_position(r: dict) -> Position:
     return Position(
         id=r["id"], analysis_id=r["analysis_id"], asset=r["asset"],
         direction=Direction(r["direction"]), entry_price=r["entry_price"],
         size_usd=r["size_usd"], leverage=r["leverage"],
         stop_loss=r["stop_loss"], take_profit=r["take_profit"],
-        status=PositionStatus(r["status"]), pnl=r["pnl"],
-        opened_at=datetime.fromisoformat(r["opened_at"]),
-        closed_at=datetime.fromisoformat(r["closed_at"]) if r["closed_at"] else None,
+        status=PositionStatus(r["status"]), pnl=r["pnl"] or 0.0,
+        opened_at=_parse_dt(r["opened_at"]),
+        closed_at=_parse_dt(r["closed_at"]),
     )
 
 
-def _row_to_decision(r: sqlite3.Row) -> AgentDecision:
+def _row_to_decision(r: dict) -> AgentDecision:
     return AgentDecision(
-        id=r["id"], cycle_id=r["cycle_id"], signals_detected=r["signals_detected"],
-        analyses_produced=r["analyses_produced"], trades_executed=r["trades_executed"],
-        reasoning_summary=r["reasoning_summary"],
-        timestamp=datetime.fromisoformat(r["timestamp"]),
+        id=r["id"], cycle_id=r["cycle_id"], signals_detected=r["signals_detected"] or 0,
+        analyses_produced=r["analyses_produced"] or 0,
+        trades_executed=r["trades_executed"] or 0,
+        reasoning_summary=r["reasoning_summary"] or "",
+        timestamp=_parse_dt(r["timestamp"]),
     )
 
 
-def _row_to_kol_signal(r: sqlite3.Row) -> KolSignal:
+def _row_to_kol_signal(r: dict) -> KolSignal:
     return KolSignal(
         id=r["id"], kol_name=r["kol_name"], wallet_address=r["wallet_address"],
         asset=r["asset"], direction=Direction(r["direction"]),
         trade_size_usd=r["trade_size_usd"],
-        detected_at=datetime.fromisoformat(r["detected_at"]),
+        detected_at=_parse_dt(r["detected_at"]),
     )
 
 
-def _row_to_wallet_snapshot(r: sqlite3.Row) -> WalletSnapshot:
+def _row_to_wallet_snapshot(r: dict) -> WalletSnapshot:
     return WalletSnapshot(
         id=r["id"], balance=r["balance"], total_pnl=r["total_pnl"],
         open_positions=r["open_positions"],
-        timestamp=datetime.fromisoformat(r["timestamp"]),
+        timestamp=_parse_dt(r["timestamp"]),
     )
 
 
-def _row_to_position_snapshot(r: sqlite3.Row) -> PositionSnapshot:
+def _row_to_position_snapshot(r: dict) -> PositionSnapshot:
     return PositionSnapshot(
         id=r["id"], position_id=r["position_id"], asset=r["asset"],
         current_price=r["current_price"], unrealized_pnl=r["unrealized_pnl"],
-        timestamp=datetime.fromisoformat(r["timestamp"]),
+        timestamp=_parse_dt(r["timestamp"]),
     )

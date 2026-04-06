@@ -52,8 +52,9 @@ KOL_DEDUP_MINUTES = 30          # shorter dedup
 BOBA_MCP_COMMAND = "npx"
 BOBA_MCP_ARGS = ["-y", "@tradeboba/cli@latest"]
 
-# ── Database ─────────────────────────────────────────────────────────────────
-DB_PATH = os.getenv("SIGNALFLOW_DB_PATH", "signalflow.db")
+# ── Supabase ─────────────────────────────────────────────────────────────────
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 # ── Paper Trading ────────────────────────────────────────────────────────────
 PAPER_WALLET_STARTING_BALANCE = 100.0

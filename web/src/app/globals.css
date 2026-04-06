@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+:root {
+  /* ── Core backgrounds ─────────────────────────────────── */
+  --sf-bg:       #090B10;
+  --sf-surface:  #0F1219;
+  --sf-card:     #151921;
+  --sf-card-alt: #1A1F2A;
+
+  /* ── Borders ──────────────────────────────────────────── */
+  --sf-border:      rgba(255, 255, 255, 0.06);
+  --sf-border-bold: rgba(255, 255, 255, 0.10);
+
+  /* ── Brand ────────────────────────────────────────────── */
+  --sf-brand:    #8B5CF6;
+  --sf-brand-2:  #06B6D4;
+
+  /* ── Semantic ─────────────────────────────────────────── */
+  --sf-up:    #22C55E;
+  --sf-down:  #EF4444;
+  --sf-warn:  #F59E0B;
+  --sf-info:  #3B82F6;
+
+  /* ── Text ─────────────────────────────────────────────── */
+  --sf-text:     #F1F5F9;
+  --sf-text-2:   #CBD5E1;
+  --sf-muted:    #64748B;
+  --sf-subtle:   #475569;
+}
+
+@theme inline {
+  --color-sf-bg:          var(--sf-bg);
+  --color-sf-surface:     var(--sf-surface);
+  --color-sf-card:        var(--sf-card);
+  --color-sf-card-alt:    var(--sf-card-alt);
+  --color-sf-border:      var(--sf-border);
+  --color-sf-border-bold: var(--sf-border-bold);
+  --color-sf-brand:       var(--sf-brand);
+  --color-sf-brand-2:     var(--sf-brand-2);
+  --color-sf-up:          var(--sf-up);
+  --color-sf-down:        var(--sf-down);
+  --color-sf-warn:        var(--sf-warn);
+  --color-sf-info:        var(--sf-info);
+  --color-sf-text:        var(--sf-text);
+  --color-sf-text-2:      var(--sf-text-2);
+  --color-sf-muted:       var(--sf-muted);
+  --color-sf-subtle:      var(--sf-subtle);
+  --font-sans:            var(--font-geist-sans);
+  --font-mono:            var(--font-geist-mono);
+}
+
+body {
+  background: var(--sf-bg);
+  color: var(--sf-text);
+}
+
+/* ── Scrollbar ────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--sf-subtle); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--sf-muted); }
+
+/* ── Recharts tooltip ─────────────────────────────────── */
+.recharts-default-tooltip {
+  background: var(--sf-card) !important;
+  border: 1px solid var(--sf-border-bold) !important;
+  border-radius: 8px !important;
+  font-size: 12px !important;
+}
+
+/* ── Selection ────────────────────────────────────────── */
+::selection {
+  background: rgba(139, 92, 246, 0.3);
+  color: var(--sf-text);
+}
+
+/* ── Focus ring ───────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--sf-brand);
+  outline-offset: 2px;
+}
+
+/* ── Details/summary ──────────────────────────────────── */
+details summary { list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details[open] summary .chevron { transform: rotate(90deg); }

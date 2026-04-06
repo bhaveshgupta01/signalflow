@@ -1,7 +1,7 @@
 # SignalFlow — GCP Deployment Commands
 
-**VM:** `signalflow` | **Zone:** `us-central1-a` | **IP:** `34.63.228.68`
-**Dashboard:** http://34.63.228.68:8501
+**VM:** `signalflow` | **Zone:** `us-central1-a` | **IP:** changes on restart — run `gcloud compute instances describe signalflow --zone=us-central1-a --format='get(networkInterfaces[0].accessConfigs[0].natIP)'`
+**Dashboard:** http://<VM_IP>:8501
 
 ---
 

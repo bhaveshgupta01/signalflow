@@ -1,0 +1,32 @@
+# Railway deployment — agent only (no Streamlit dashboard)
+# Dashboard is served by Vercel separately.
+
+FROM node:20-slim AS node-base
+
+FROM python:3.13-slim
+
+# Copy Node.js (needed for Boba CLI proxy)
+COPY --from=node-base /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-base /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl procps && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Python deps — agent only, no Streamlit/pandas/plotly
+RUN pip install --no-cache-dir \
+    google-genai mcp pydantic python-dotenv supabase
+
+# Pre-install Boba CLI
+RUN npx -y @tradeboba/cli@latest --help 2>/dev/null || true
+
+# Copy agent source files only
+COPY *.py ./
+COPY start_agent.sh ./
+RUN chmod +x start_agent.sh
+
+CMD ["./start_agent.sh"]

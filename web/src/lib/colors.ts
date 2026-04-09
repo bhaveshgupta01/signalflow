@@ -1,24 +1,26 @@
-/** SignalFlow theme colors */
+/** Boba.xyz-aligned theme colors */
 export const COLORS = {
-  bg: "#090B10",
-  surface: "#0F1219",
-  card: "#151921",
-  cardAlt: "#1A1F2A",
-  border: "rgba(255,255,255,0.06)",
-  borderBold: "rgba(255,255,255,0.10)",
-  brand: "#8B5CF6",
-  brand2: "#06B6D4",
-  up: "#22C55E",
-  down: "#EF4444",
+  bg: "#141316",
+  surface: "#1e1d21",
+  card: "#28272b",
+  cardAlt: "#1e1d21",
+  border: "#3c3a41",
+  borderBold: "#656169",
+  brand: "#8239ef",
+  brand2: "#bfa1f5",
+  up: "#84f593",
+  upStrong: "#14eb31",
+  down: "#f2685f",
+  downStrong: "#eb2314",
   warn: "#F59E0B",
-  info: "#3B82F6",
-  text: "#F1F5F9",
-  text2: "#CBD5E1",
-  muted: "#64748B",
-  subtle: "#475569",
+  info: "#bfa1f5",
+  text: "#ffffff",
+  text2: "#b8b5bb",
+  muted: "#858189",
+  subtle: "#656169",
 } as const;
 
-/** Recharts color cycle */
+/** Recharts color cycle — boba palette */
 export const CHART_COLORS = [
   COLORS.brand,
   COLORS.brand2,
@@ -26,8 +28,8 @@ export const CHART_COLORS = [
   COLORS.warn,
   COLORS.info,
   COLORS.down,
-  "#A78BFA",
-  "#2DD4BF",
+  "#a78bfa",
+  "#2dd4bf",
 ];
 
 /** Per-asset colors for portfolio charts */

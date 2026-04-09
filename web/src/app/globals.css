@@ -1,31 +1,31 @@
 @import "tailwindcss";
 
 :root {
-  /* ── Core backgrounds ─────────────────────────────────── */
-  --sf-bg:       #090B10;
-  --sf-surface:  #0F1219;
-  --sf-card:     #151921;
-  --sf-card-alt: #1A1F2A;
+  /* ── Boba.xyz Taro Dark palette ──────────────────────── */
+  --sf-bg:       #141316;
+  --sf-surface:  #1e1d21;
+  --sf-card:     #28272b;
+  --sf-card-alt: #1e1d21;
 
   /* ── Borders ──────────────────────────────────────────── */
-  --sf-border:      rgba(255, 255, 255, 0.06);
-  --sf-border-bold: rgba(255, 255, 255, 0.10);
+  --sf-border:      #3c3a41;
+  --sf-border-bold: #656169;
 
-  /* ── Brand ────────────────────────────────────────────── */
-  --sf-brand:    #8B5CF6;
-  --sf-brand-2:  #06B6D4;
+  /* ── Brand (Boba purple) ─────────────────────────────── */
+  --sf-brand:    #8239ef;
+  --sf-brand-2:  #bfa1f5;
 
   /* ── Semantic ─────────────────────────────────────────── */
-  --sf-up:    #22C55E;
-  --sf-down:  #EF4444;
+  --sf-up:    #84f593;
+  --sf-down:  #f2685f;
   --sf-warn:  #F59E0B;
-  --sf-info:  #3B82F6;
+  --sf-info:  #bfa1f5;
 
   /* ── Text ─────────────────────────────────────────────── */
-  --sf-text:     #F1F5F9;
-  --sf-text-2:   #CBD5E1;
-  --sf-muted:    #64748B;
-  --sf-subtle:   #475569;
+  --sf-text:     #ffffff;
+  --sf-text-2:   #b8b5bb;
+  --sf-muted:    #858189;
+  --sf-subtle:   #656169;
 }
 
 @theme inline {
@@ -45,32 +45,42 @@
   --color-sf-text-2:      var(--sf-text-2);
   --color-sf-muted:       var(--sf-muted);
   --color-sf-subtle:      var(--sf-subtle);
-  --font-sans:            var(--font-geist-sans);
-  --font-mono:            var(--font-geist-mono);
+  --font-sans:            'Sora', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-body:            'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono:            ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 body {
   background: var(--sf-bg);
   color: var(--sf-text);
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Sora', ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: -0.02em;
 }
 
 /* ── Scrollbar ────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--sf-subtle); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--sf-muted); }
+::-webkit-scrollbar-thumb { background: #3c3a41; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #656169; }
 
 /* ── Recharts tooltip ─────────────────────────────────── */
 .recharts-default-tooltip {
   background: var(--sf-card) !important;
   border: 1px solid var(--sf-border-bold) !important;
-  border-radius: 8px !important;
+  border-radius: 12px !important;
   font-size: 12px !important;
+  font-family: 'Inter', sans-serif !important;
 }
 
 /* ── Selection ────────────────────────────────────────── */
 ::selection {
-  background: rgba(139, 92, 246, 0.3);
+  background: rgba(130, 57, 239, 0.3);
   color: var(--sf-text);
 }
 
@@ -84,3 +94,35 @@ body {
 details summary { list-style: none; }
 details summary::-webkit-details-marker { display: none; }
 details[open] summary .chevron { transform: rotate(90deg); }
+
+/* ── Boba-style card hover ────────────────────────────── */
+.boba-card {
+  background: var(--sf-card);
+  border: 1px solid var(--sf-border);
+  border-radius: 12px;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+.boba-card:hover {
+  border-color: var(--sf-border-bold);
+  background: #2e2d32;
+}
+
+/* ── Pill badge ───────────────────────────────────────── */
+.boba-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: 'Sora', sans-serif;
+}
+
+/* ── Pulse animation for live indicator ───────────────── */
+@keyframes boba-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.boba-pulse {
+  animation: boba-pulse 2s ease-in-out infinite;
+}

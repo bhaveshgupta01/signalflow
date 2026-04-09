@@ -52,8 +52,14 @@ from risk import (
     calculate_position_size,
     can_open_position,
     can_open_position_for_asset,
+    check_drawdown,
+    check_orderbook_liquidity,
+    check_trade_cooldown,
+    check_trend_alignment,
     clamp_leverage,
     compute_stop_take,
+    compute_stop_take_atr,
+    confirm_fill_and_track_slippage,
 )
 from kol_tracker import check_kol_alignment, detect_kol_signals
 from signals import detect_signals
@@ -61,44 +67,75 @@ from signals import detect_signals
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-You are SignalFlow, a disciplined AI crypto trading agent. You manage a $100 \
-paper wallet and trade perpetual futures on Hyperliquid. Your goal is a high \
-win rate — only trade when you have a clear, well-reasoned edge.
+You are SignalFlow, a systematic AI crypto trading agent managing a paper \
+portfolio on Hyperliquid perpetual futures. You combine prediction market \
+intelligence with on-chain data to find short-term edges.
 
-## Your job
-You receive market signals — prediction market moves, whale trades, funding \
-rate spikes, or trending tokens. Your job is to evaluate whether there is a \
-genuine, actionable edge worth trading. Most signals are noise — reject them.
+## Analysis Framework (inspired by institutional quant desks)
 
-1. Use tools to gather data:
-   - Polymarket sentiment, holders, price history
-   - Hyperliquid price, funding rates, order book depth
-   - Any other data that helps you decide
+When you receive a signal, execute this structured analysis:
 
-2. Be selective. Only trade when multiple data points align:
-   - The signal is significant (not a small random fluctuation)
-   - The direction is clear and supported by data
-   - The risk/reward is favorable (potential gain > potential loss)
-   - You can articulate a specific edge, not just "momentum"
+### Step 1: Context Snapshot
+- What is the current regime? (risk-on/risk-off, trending/ranging)
+- What is the broader crypto market doing? (BTC dominance, total market trend)
+- Are there upcoming macro catalysts? (Fed, CPI, major unlocks, expiries)
 
-3. Return JSON (no markdown fences):
+### Step 2: Signal Quality Assessment (Dog vs Tail)
+- DOG (Spot/Structure): What does the 4h chart structure look like? Higher highs? \
+  Support/resistance levels? EMA alignment?
+- TAIL (Derivatives): What does Hyperliquid funding rate say? Is the trade crowded? \
+  What does open interest and order book depth tell you?
+- SENTIMENT: What does the Polymarket probability shift imply? Is the move backed \
+  by holder concentration changes or just noise?
+
+### Step 3: Hypothesis Generation
+For each viable trade, define:
+- THESIS: Clear 1-sentence directional view with specific catalyst
+- EDGE TYPE: Flow (following smart money), Mean Reversion (fading extremes), \
+  Narrative (catalyst-driven), or Sentiment (contrarian)
+- EDGE DEPTH: Deep (structural, multi-factor) or Shallow (single signal, tactical)
+- INVALIDATION: Specific price level or condition that kills the thesis
+- TIMEFRAME: Scalp (30min-2h), Short Swing (2-12h), or Swing (12h-4d)
+
+### Step 4: Decision
+Return JSON (no markdown fences):
 {
-  "conviction": <float 0.0–1.0>,
+  "conviction": <float 0.0-1.0>,
   "direction": "long" | "short",
-  "asset": "<BTC, ETH, SOL, etc — must be on Hyperliquid>",
-  "suggested_size_usd": <float — conservative, proportional to conviction>,
-  "leverage": <int 1-3>,
-  "reasoning": "<2-3 sentences — what's the specific edge and why it's reliable>",
-  "risk_notes": "<what could go wrong, what would invalidate this trade>"
+  "asset": "<BTC, ETH, SOL, DOGE, ARB, AVAX, LINK, etc>",
+  "suggested_size_usd": <float>,
+  "leverage": <int 1-7 — scale with conviction: 1-2x for 0.4-0.5, 3x for 0.5-0.6, 4-5x for 0.6-0.8, 5-7x for 0.8+>,
+  "hold_hours": <float 0.5-6>,
+  "reasoning": "<your thesis + edge type + what data supports it>",
+  "risk_notes": "<invalidation condition + what could go wrong>",
+  "edge_type": "<flow|mean_reversion|narrative|sentiment>",
+  "edge_depth": "<deep|shallow>"
 }
 
-## Rules
-- Quality over quantity. It is BETTER to skip a marginal signal than to take a bad trade.
-- If you're unsure, set conviction below 0.5. Only set conviction above 0.7 when the edge is clear.
-- suggested_size_usd should be conservative: 0.7 conviction = $20-35, 0.9 conviction = $50-80.
-- Keep leverage low (1-2x default, 3x only for the strongest setups).
-- Only suggest assets on Hyperliquid perps (BTC, ETH, SOL, DOGE, ARB, etc.)
-- A vague "bullish momentum" is NOT an edge. Name the specific catalyst.
+## Conviction Calibration
+- 0.0-0.3: No clear edge, or conflicting signals. Skip.
+- 0.3-0.5: Weak edge, single factor. Trade only if risk/reward > 2:1.
+- 0.5-0.7: Moderate edge, 2+ factors align. Standard position size.
+- 0.7-0.9: Strong edge, multiple factors converge. Full position.
+- 0.9-1.0: Exceptional edge, rare. Max size with tight invalidation.
+
+## Sizing Guide (based on current ~$90 portfolio)
+- 0.4 conviction = $10-15 (exploratory)
+- 0.5 conviction = $15-25 (standard)
+- 0.7 conviction = $25-40 (high conviction)
+- 0.9 conviction = $40-60 (max conviction)
+
+## Key Rules
+- Use the available tools aggressively to gather data before deciding.
+- You MUST trade diverse assets — don't just default to BTC. Consider SOL, ETH, \
+  DOGE, ARB, AVAX, LINK, OP, SUI, MATIC based on where the signal points.
+- A Polymarket probability shift of 5%+ combined with aligned funding rate or \
+  whale activity is a MODERATE edge (0.5+), not noise.
+- When Polymarket AND whale activity align on direction, that's a STRONG edge (0.7+).
+- Funding rate divergence >0.01% combined with price structure = tradeable edge.
+- Do not default to low conviction just because you're uncertain about one factor. \
+  Weight the factors: 2 out of 3 aligning is enough for 0.5+ conviction.
+- Be willing to act. Inaction has a cost — missed opportunities compound.
 """
 
 TRADE_PROMPT = """\
@@ -323,32 +360,42 @@ async def _analyze_signal(
     except Exception:
         pass
 
-    # Help Gemini interpret the signal correctly
-    # "Will BTC dip to $50k?" at price 0.08 means 8% chance of dip = BULLISH for BTC
-    # "Will BTC reach $80k?" at price 0.90 means 90% chance of reaching = BULLISH for BTC
+    # Help Gemini interpret the signal correctly — with strict guardrails
+    # CRITICAL FIX: "won't reach target" ≠ "will go down"
+    # A drop in "Will SOL reach $110?" from 10% to 5% means the $110 target is unlikely.
+    # It says NOTHING about whether SOL will drop from $82. It could rally to $100 and
+    # the $110 probability would still be low.
     interpretation_hint = ""
     q = signal.market_question.lower()
     if "dip" in q or "drop" in q or "fall" in q or "below" in q:
         if signal.price_change_pct < 0:
             interpretation_hint = (
                 "IMPORTANT: This is a 'dip/drop' market and its probability FELL. "
-                "That means the market thinks a dip is LESS likely now = BULLISH for the asset."
+                "That means the market thinks a dip is LESS likely now = BULLISH for the asset. "
+                "This is a genuine bullish signal — consider going LONG."
             )
         else:
             interpretation_hint = (
                 "IMPORTANT: This is a 'dip/drop' market and its probability ROSE. "
-                "That means the market thinks a dip is MORE likely = BEARISH for the asset."
+                "That means the market thinks a dip is MORE likely = BEARISH for the asset. "
+                "This is a genuine bearish signal — consider going SHORT."
             )
-    elif "above" in q or "reach" in q or "rise" in q:
+    elif "above" in q or "reach" in q or "rise" in q or "hit" in q:
         if signal.price_change_pct > 0:
             interpretation_hint = (
                 "IMPORTANT: This is a 'reach/above' market and its probability ROSE. "
-                "That means the market is MORE bullish = BULLISH for the asset."
+                "That means the market is MORE bullish = BULLISH for the asset. "
+                "This is a genuine bullish signal — consider going LONG."
             )
         else:
             interpretation_hint = (
-                "IMPORTANT: This is a 'reach/above' market and its probability FELL. "
-                "That means the market is LESS bullish = BEARISH for the asset."
+                "NOTE: This is a 'reach/above' market and its probability FELL. "
+                "This means the specific target price is now seen as less likely. "
+                "It does NOT necessarily mean the asset will decline — the target may "
+                "just be too ambitious. Use Hyperliquid price data and funding rates "
+                "to determine actual directional bias. If the asset's spot price is "
+                "also declining or funding is negative, this reinforces a bearish view. "
+                "If spot is stable/rising, the signal may be weak — adjust conviction accordingly."
             )
 
     user_msg = (
@@ -369,15 +416,17 @@ async def _analyze_signal(
             logger.warning("Could not parse analysis JSON from Gemini response")
             return None
 
-        leverage = clamp_leverage(int(parsed.get("leverage", 3)))
+        conviction = float(parsed.get("conviction", 0))
+        leverage = clamp_leverage(int(parsed.get("leverage", 3)), conviction)
+        hold_hours = max(0.5, min(6.0, float(parsed.get("hold_hours", 2.0))))
         analysis = Analysis(
             signal_id=signal.id or 0,
             reasoning=parsed.get("reasoning", ""),
-            conviction_score=float(parsed.get("conviction", 0)),
+            conviction_score=conviction,
             suggested_direction=Direction(parsed.get("direction", "long")),
             suggested_asset=parsed.get("asset", "BTC"),
             suggested_size_usd=float(parsed.get("suggested_size_usd", 100)),
-            risk_notes=parsed.get("risk_notes", f"leverage={leverage}"),
+            risk_notes=f"leverage={leverage} hold={hold_hours}h " + parsed.get("risk_notes", ""),
         )
         analysis = save_analysis(analysis)
         logger.info(
@@ -401,34 +450,39 @@ async def _execute_trade(
     analysis: Analysis,
     size_usd: float,
 ) -> Position | None:
-    """Open a perps position via direct Boba hl_place_order, with Gemini fallback."""
-    # Extract leverage from risk_notes (stashed there since Pydantic won't allow extra fields)
+    """Open a perps position with institutional-grade execution checks.
+
+    Pipeline: leverage → orderbook check → ATR stops → market order → fill confirmation → SL/TP orders.
+    """
+    # Extract leverage from risk_notes
     leverage = 3
     if analysis.risk_notes and "leverage=" in analysis.risk_notes:
         try:
             leverage = int(analysis.risk_notes.split("leverage=")[1].split()[0].strip(","))
         except (ValueError, IndexError):
             pass
-    leverage = clamp_leverage(leverage)
+    leverage = clamp_leverage(leverage, analysis.conviction_score)
 
-    # Get a rough entry price for stop/TP calculation
+    # Get entry price
     entry_price = await _get_asset_price(boba, analysis.suggested_asset)
     if entry_price <= 0:
         logger.warning("Could not fetch entry price for %s", analysis.suggested_asset)
         return None
 
-    stop_loss, take_profit = compute_stop_take(
-        entry_price, analysis.suggested_direction
+    # ── NEW: Orderbook liquidity check ──
+    is_liquid, est_slippage, liq_reason = await check_orderbook_liquidity(
+        boba, analysis.suggested_asset, size_usd, analysis.suggested_direction
+    )
+    if not is_liquid:
+        logger.warning("Orderbook rejected %s: %s", analysis.suggested_asset, liq_reason)
+        return None
+
+    # ── NEW: ATR-based dynamic stops (replaces fixed 5%/10%) ──
+    stop_loss, take_profit = await compute_stop_take_atr(
+        boba, entry_price, analysis.suggested_direction, analysis.suggested_asset
     )
 
-    # Enrich analysis with token info (if available)
-    try:
-        info = await boba.call_tool("get_token_info", {"token": analysis.suggested_asset, "chain": "1"})
-        logger.debug("Token info for %s: %s", analysis.suggested_asset, str(info)[:200])
-    except Exception:
-        pass
-
-    # Direct execution via Boba — no Gemini in the loop
+    # Direct execution via Boba
     try:
         side = "buy" if analysis.suggested_direction == Direction.LONG else "sell"
 
@@ -439,7 +493,7 @@ async def _execute_trade(
             "mode": "cross",
         })
 
-        # Place the order
+        # Place the market order
         order_result = await boba.call_tool("hl_place_order", {
             "coin": analysis.suggested_asset,
             "side": side,
@@ -447,6 +501,17 @@ async def _execute_trade(
             "type": "market",
         })
         logger.info("hl_place_order result: %s", str(order_result)[:200])
+
+        # ── NEW: Confirm fill and track slippage ──
+        actual_price, slippage = await confirm_fill_and_track_slippage(
+            boba, analysis.suggested_asset, entry_price, analysis.suggested_direction
+        )
+        if actual_price and actual_price > 0:
+            # Use actual fill price for SL/TP (more accurate)
+            entry_price = actual_price
+            stop_loss, take_profit = await compute_stop_take_atr(
+                boba, actual_price, analysis.suggested_direction, analysis.suggested_asset
+            )
 
         # Set stop-loss
         sl_side = "sell" if analysis.suggested_direction == Direction.LONG else "buy"
@@ -467,6 +532,7 @@ async def _execute_trade(
             "triggerPrice": str(take_profit),
         })
 
+        slippage_note = f" slippage={slippage:+.3%}" if slippage is not None else ""
         position = Position(
             analysis_id=analysis.id or 0,
             asset=analysis.suggested_asset,
@@ -479,9 +545,10 @@ async def _execute_trade(
         )
         position = save_position(position)
         logger.info(
-            "Opened %s %s $%.0f @ %.2f via hl_place_order",
+            "Opened %s %s $%.0f @ %.4f (SL: %.2f, TP: %.2f%s)",
             position.direction.value, position.asset,
             position.size_usd, position.entry_price,
+            position.stop_loss, position.take_profit, slippage_note,
         )
         return position
     except Exception:
@@ -563,6 +630,7 @@ async def _manage_positions(
         hit_sl = (p.direction == Direction.LONG and current_price <= p.stop_loss) or \
                  (p.direction == Direction.SHORT and current_price >= p.stop_loss)
         if hit_sl:
+            await _close_position_on_exchange(boba, p.asset)
             update_position(p.id, status=PositionStatus.STOPPED, pnl=pnl, closed_at=now)
             logger.info("STOP #%d %s @ $%.2f -> PnL $%+.2f", p.id, p.asset, current_price, pnl)
             continue
@@ -571,6 +639,7 @@ async def _manage_positions(
         hit_tp = (p.direction == Direction.LONG and current_price >= p.take_profit) or \
                  (p.direction == Direction.SHORT and current_price <= p.take_profit)
         if hit_tp:
+            await _close_position_on_exchange(boba, p.asset)
             update_position(p.id, status=PositionStatus.CLOSED, pnl=pnl, closed_at=now)
             logger.info("TP #%d %s @ $%.2f -> PnL $%+.2f", p.id, p.asset, current_price, pnl)
             continue
@@ -586,29 +655,61 @@ async def _manage_positions(
                 update_position(p.id, stop_loss=new_sl)
                 logger.info("TRAIL #%d %s SL -> $%.2f (locked)", p.id, p.asset, new_sl)
 
-        # ── Smart exit analysis: ask Gemini every ~30 min if position is old enough ──
-        # Only for positions > 1 hour old, and only check once per ~30 min
-        # (we check based on age being near a 30-min boundary to avoid spamming)
-        age_minutes = age_hours * 60
-        should_analyze_exit = (
-            age_hours >= 1.0
-            and int(age_minutes) % 30 < 2  # within 2 min of a 30-min mark
-        )
+        # ── Extract planned hold time from risk_notes ──
+        planned_hold = MAX_POSITION_AGE_HOURS  # default
+        if p.id:
+            # Get the analysis that created this position
+            try:
+                from db import _get_conn
+                conn = _get_conn()
+                row = conn.execute(
+                    "SELECT risk_notes FROM analyses WHERE id = (SELECT analysis_id FROM positions WHERE id = ?)",
+                    (p.id,),
+                ).fetchone()
+                if row and row[0] and "hold=" in row[0]:
+                    planned_hold = float(row[0].split("hold=")[1].split("h")[0])
+            except Exception:
+                pass
 
-        if should_analyze_exit:
+        # ── Planned hold time reached: ask AI if we should close or extend ──
+        if age_hours >= planned_hold:
             try:
                 close_decision = await _should_close_position(client, boba, p, current_price, pnl, pnl_pct, age_hours)
                 if close_decision:
+                    await _close_position_on_exchange(boba, p.asset)
                     status = PositionStatus.CLOSED if pnl >= 0 else PositionStatus.STOPPED
                     update_position(p.id, status=status, pnl=pnl, closed_at=now)
-                    logger.info("AI-EXIT #%d %s %s -> PnL $%+.2f (%.1fh) reason: %s",
+                    logger.info("PLANNED-EXIT #%d %s %s -> PnL $%+.2f (%.1fh, planned %.1fh) reason: %s",
+                                p.id, p.direction.value, p.asset, pnl, age_hours, planned_hold, close_decision)
+                    continue
+                else:
+                    logger.info("HOLD-EXTENDED #%d %s — AI says hold past planned %.1fh", p.id, p.asset, planned_hold)
+            except Exception:
+                # If AI check fails at planned hold time, close the position
+                await _close_position_on_exchange(boba, p.asset)
+                status = PositionStatus.CLOSED if pnl >= 0 else PositionStatus.STOPPED
+                update_position(p.id, status=status, pnl=pnl, closed_at=now)
+                logger.info("PLANNED-CLOSE #%d %s after %.1fh (planned %.1fh) -> PnL $%+.2f",
+                            p.id, p.asset, age_hours, planned_hold, pnl)
+                continue
+
+        # ── Smart exit: also check mid-way if losing badly ──
+        elif age_hours >= planned_hold * 0.5 and pnl_pct < -2.0:
+            try:
+                close_decision = await _should_close_position(client, boba, p, current_price, pnl, pnl_pct, age_hours)
+                if close_decision:
+                    await _close_position_on_exchange(boba, p.asset)
+                    status = PositionStatus.STOPPED
+                    update_position(p.id, status=status, pnl=pnl, closed_at=now)
+                    logger.info("EARLY-EXIT #%d %s %s -> PnL $%+.2f (%.1fh, losing) reason: %s",
                                 p.id, p.direction.value, p.asset, pnl, age_hours, close_decision)
                     continue
             except Exception:
-                logger.debug("Exit analysis failed for #%d, continuing", p.id)
+                pass
 
-        # ── Hard age limit: 6 hours absolute max (safety net) ──
-        if age_hours >= 6.0:
+        # ── Hard age limit: 8 hours absolute max (safety net) ──
+        if age_hours >= 8.0:
+            await _close_position_on_exchange(boba, p.asset)
             status = PositionStatus.CLOSED if pnl >= 0 else PositionStatus.STOPPED
             update_position(p.id, status=status, pnl=pnl, closed_at=now)
             logger.info("MAX-AGE #%d %s after %.1fh -> PnL $%+.2f", p.id, p.asset, age_hours, pnl)
@@ -623,7 +724,7 @@ async def _should_close_position(
     pnl_pct: float,
     age_hours: float,
 ) -> str | None:
-    """Ask Gemini whether to close a position. Returns reason string if yes, None if hold."""
+    """Ask Gemini whether to close a position. Returns reason string if yes, None if hold/extend."""
     prompt = (
         f"You have an open {position.direction.value.upper()} position on {position.asset}:\n"
         f"- Entry: ${position.entry_price:,.2f}, Current: ${current_price:,.2f}\n"
@@ -631,12 +732,12 @@ async def _should_close_position(
         f"- Size: ${position.size_usd:.0f} at {position.leverage}x leverage\n"
         f"- Age: {age_hours:.1f} hours\n"
         f"- Stop-loss: ${position.stop_loss:,.2f}, Take-profit: ${position.take_profit:,.2f}\n\n"
-        f"Check the current market conditions using tools. Should you CLOSE this position now or HOLD?\n\n"
+        f"Check the current market conditions using tools. Should you CLOSE this position or HOLD (extend)?\n\n"
         f"Consider:\n"
-        f"- Is the trend still in your favor?\n"
-        f"- Are there signs of reversal?\n"
-        f"- Is the risk/reward still good given the current PnL?\n"
-        f"- Has the original thesis changed?\n\n"
+        f"- Is the trend still in your favor? Check current price action.\n"
+        f"- Has anything changed since entry? New signals, funding shift, whale activity?\n"
+        f"- If profitable: is there more upside or is it exhausting?\n"
+        f"- If losing: is it likely to recover or should we cut losses?\n\n"
         f"Return JSON: {{\"action\": \"close\" or \"hold\", \"reason\": \"one sentence why\"}}"
     )
 
@@ -734,6 +835,17 @@ async def _run_tool_loop(
 
     # Exhausted rounds — return whatever we have
     return "\n".join(text_parts) if text_parts else ""
+
+
+async def _close_position_on_exchange(boba: BobaClient, asset: str) -> bool:
+    """Close a position on Hyperliquid using hl_close_position (atomic, no dust)."""
+    try:
+        result = await boba.call_tool("hl_close_position", {"coin": asset})
+        logger.info("hl_close_position %s: %s", asset, str(result)[:200])
+        return True
+    except Exception:
+        logger.debug("hl_close_position failed for %s — position may already be closed", asset, exc_info=True)
+        return False
 
 
 async def _get_asset_price(boba: BobaClient, asset: str) -> float:
@@ -931,6 +1043,20 @@ async def _process_signal(
         )
         return None
 
+    # Anti-churn: cooldown between trades on same asset
+    allowed, reason = check_trade_cooldown(analysis.suggested_asset)
+    if not allowed:
+        logger.info("Cooldown blocked: %s", reason)
+        return None
+
+    # Trend regime check: block counter-trend trades
+    allowed, reason = await check_trend_alignment(
+        boba, analysis.suggested_asset, analysis.suggested_direction
+    )
+    if not allowed:
+        logger.warning("Trend blocked: %s", reason)
+        return None
+
     # Risk gate
     allowed, reason = can_open_position(analysis.suggested_size_usd, 3)
     if not allowed:
@@ -946,7 +1072,8 @@ async def _process_signal(
             old_positions = get_open_positions()
             old_p = next((p for p in old_positions if p.id == old_id), None)
             if old_p:
-                # Get current price to calculate final PnL
+                # Close on exchange first, then update DB
+                await _close_position_on_exchange(boba, old_p.asset)
                 current_price = await _get_asset_price(boba, old_p.asset)
                 if current_price > 0:
                     if old_p.direction == Direction.LONG:

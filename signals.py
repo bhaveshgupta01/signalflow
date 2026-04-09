@@ -14,6 +14,9 @@ from config import (
     MARKET_CATEGORIES,
     MIN_SIGNAL_PRICE_CHANGE,
     SIGNAL_DEDUP_MINUTES,
+    SIGNAL_MIN_PROBABILITY,
+    SIGNAL_MAX_PROBABILITY,
+    SIGNAL_REJECT_TARGET_RATIO,
 )
 from db import get_signals_for_market, save_signal
 from mcp_client import BobaClient
@@ -69,8 +72,24 @@ async def detect_signals(boba: BobaClient) -> list[Signal]:
                 if abs(price_change) < MIN_SIGNAL_PRICE_CHANGE:
                     continue
 
-                # Skip dead markets (price near 0 or 1 = already resolved)
-                if yes_price < 0.02 or yes_price > 0.98:
+                # Skip dead, resolved, or low-quality markets
+                if yes_price < SIGNAL_MIN_PROBABILITY or yes_price > SIGNAL_MAX_PROBABILITY:
+                    logger.debug("Skipping %s: probability %.3f outside [%.2f, %.2f]",
+                                 question[:40], yes_price, SIGNAL_MIN_PROBABILITY, SIGNAL_MAX_PROBABILITY)
+                    continue
+
+                # Reject "reach $X" signals where the target is unrealistically far
+                # e.g., "Will SOL reach $110?" when SOL is at $82 → ratio = 82/110 = 0.75 → OK
+                # e.g., "Will SOL reach $200?" when SOL is at $82 → ratio = 82/200 = 0.41 → OK
+                # But probability of 5% on "reach $110" means market already priced it as unlikely
+                # These are noise signals — the move in probability doesn't predict price action
+                q_lower = question.lower()
+                is_target_market = any(w in q_lower for w in ["reach", "above", "hit", "dip", "below", "drop"])
+                if is_target_market and yes_price < 0.15:
+                    logger.debug(
+                        "Skipping low-probability target market: %s (%.1f%% — market already says unlikely)",
+                        question[:50], yes_price * 100,
+                    )
                     continue
 
                 # De-duplicate: skip if we already signalled this market recently

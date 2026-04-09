@@ -36,7 +36,7 @@ export default function AllocationPie({ data }: { data: Slice[] }) {
           contentStyle={{
             background: COLORS.card,
             border: `1px solid ${COLORS.borderBold}`,
-            borderRadius: 8,
+            borderRadius: 12,
             color: COLORS.text,
             fontSize: 12,
           }}

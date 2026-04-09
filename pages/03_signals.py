@@ -114,7 +114,8 @@ st.subheader("Signal Feed")
 if signals:
     for s in signals:
         now = datetime.utcnow()
-        delta = now - s.detected_at
+        det = s.detected_at.replace(tzinfo=None) if s.detected_at.tzinfo else s.detected_at
+        delta = now - det
         total_secs = delta.total_seconds()
         if total_secs < 3600:
             ago = f"{int(total_secs // 60)}m ago"

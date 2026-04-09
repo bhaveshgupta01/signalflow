@@ -8,6 +8,11 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta, timezone
 
 from styles.theme import COLORS, apply_theme
+
+
+def _naive(dt):
+    """Strip timezone info for safe comparisons."""
+    return dt.replace(tzinfo=None) if dt and dt.tzinfo else dt
 from db import (
     init_db, get_all_positions, get_open_positions, get_stats,
     get_wallet_history, get_recent_analyses,
@@ -97,10 +102,10 @@ cutoff = datetime.utcnow() - timedelta(minutes=range_min[time_range])
 
 fig = go.Figure()
 
-# ── Total wallet balance (thick white line) ──
+# ── Total wallet balance (thick white line — shown as PnL from $100) ──
 if wallet_history and len(wallet_history) > 1:
     filtered = sorted(
-        [w for w in wallet_history if w.timestamp >= cutoff],
+        [w for w in wallet_history if _naive(w.timestamp) >= cutoff],
         key=lambda w: w.timestamp,
     )
     if len(filtered) < 2:
@@ -109,8 +114,10 @@ if wallet_history and len(wallet_history) > 1:
     fig.add_trace(go.Scatter(
         x=[_local(w.timestamp) for w in filtered],
         y=[w.balance for w in filtered],
-        mode="lines", name="Total Wallet",
-        line=dict(color="white", width=3),
+        mode="lines", name=f"Wallet ${filtered[-1].balance:.2f}" if filtered else "Wallet",
+        line=dict(color="white", width=4),
+        fill="tozeroy",
+        fillcolor="rgba(255,255,255,0.03)",
         hovertemplate="<b>Wallet</b><br>%{x|%I:%M %p}<br>$%{y:.2f}<extra></extra>",
     ))
 
@@ -134,7 +141,7 @@ for p in positions:
     values = [round(margin + s.unrealized_pnl, 2) for s in snapshots]
 
     # Add the opening point
-    if p.opened_at >= cutoff:
+    if _naive(p.opened_at) >= cutoff:
         times.insert(0, _local(p.opened_at))
         values.insert(0, margin)
 
@@ -163,8 +170,8 @@ for p in positions:
     ))
 
 # ── Buy/sell markers ──
-buy_events = [e for e in trade_events if e["type"] == "open" and e["timestamp"] >= cutoff]
-sell_events = [e for e in trade_events if e["type"] == "close" and e["timestamp"] >= cutoff]
+buy_events = [e for e in trade_events if e["type"] == "open" and _naive(e["timestamp"]) >= cutoff]
+sell_events = [e for e in trade_events if e["type"] == "close" and _naive(e["timestamp"]) >= cutoff]
 
 if buy_events:
     fig.add_trace(go.Scatter(
@@ -196,16 +203,11 @@ if sell_events:
         customdata=[[e["asset"], e.get("pnl", 0)] for e in sell_events],
     ))
 
-# ── Reference line ──
-fig.add_hline(y=PAPER_WALLET_STARTING_BALANCE, line_dash="dash",
-              line_color=COLORS["muted"], opacity=0.4,
-              annotation_text=f"Start ${PAPER_WALLET_STARTING_BALANCE:.0f}")
-
 fig.update_layout(
-    **PLOTLY_LAYOUT, height=500, showlegend=True,
+    **PLOTLY_LAYOUT, height=1000, showlegend=True,
     xaxis=dict(tickformat="%I:%M %p\n%b %d"),
     yaxis=dict(title="Value ($)", tickprefix="$"),
-    legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"),
+    legend=dict(orientation="h", y=-0.08, x=0.5, xanchor="center"),
 )
 
 if not wallet_history or len(wallet_history) < 2:
@@ -223,7 +225,7 @@ st.subheader(f"Open Positions ({len(open_pos)})")
 if open_pos:
     for p in open_pos:
         margin = p.size_usd / max(p.leverage, 1)
-        age_h = (datetime.utcnow() - p.opened_at).total_seconds() / 3600
+        age_h = (datetime.utcnow() - _naive(p.opened_at)).total_seconds() / 3600
         pnl_color_str = "normal" if p.pnl >= 0 else "inverse"
         arrow = "^" if p.direction.value == "long" else "v"
 

@@ -196,11 +196,11 @@ st.markdown(
         Signal<span style="color:#6c63ff;">Flow</span>
     </div>
     <div class="hero-subtitle">
-        An autonomous AI trading agent that monitors prediction markets, tracks whale wallets,
-        and executes perpetual futures trades &mdash; all powered by
-        <span class="boba">Boba Agents MCP</span>.
-        Built to demonstrate what's possible when you give an AI agent
-        access to 85+ on-chain trading tools through a single protocol.
+        An autonomous AI trading agent with <strong>institutional-grade risk management</strong>
+        that monitors prediction markets, tracks whale wallets, and executes perpetual futures
+        trades &mdash; all powered by <span class="boba">Boba Agents MCP</span>.
+        ATR-based dynamic stops, portfolio drawdown breakers, orderbook liquidity checks,
+        and fill confirmation &mdash; built on 85+ on-chain tools through a single protocol.
     </div>
     """,
     unsafe_allow_html=True,
@@ -217,9 +217,9 @@ st.markdown('<div class="section-label">AT A GLANCE</div>', unsafe_allow_html=Tr
 c1, c2, c3, c4, c5 = st.columns(5)
 stats_data = [
     ("85+", "Boba Tools", c1),
-    ("6", "Async Triggers", c2),
-    ("9", "Blockchains", c3),
-    ("5", "Dashboard Pages", c4),
+    ("22+", "Tools Integrated", c2),
+    ("5", "Risk Layers", c3),
+    ("6", "Async Triggers", c4),
     ("$100", "Paper Wallet", c5),
 ]
 for val, label, col in stats_data:
@@ -259,7 +259,7 @@ st.markdown(
             exactly the data it needs to make trading decisions.
         </p>
         <div style="font-size:0.76rem;font-weight:700;color:{COLORS["accent"]};letter-spacing:0.06em;
-            text-transform:uppercase;margin-bottom:10px;">Tools used by SignalFlow</div>
+            text-transform:uppercase;margin-bottom:10px;">Tools directly integrated</div>
         <div>
             <span class="tool-pill">pm_search_markets</span>
             <span class="tool-pill">pm_get_price_history</span>
@@ -270,13 +270,23 @@ st.markdown(
             <span class="tool-pill">hl_place_order</span>
             <span class="tool-pill">hl_update_leverage</span>
             <span class="tool-pill">hl_get_predicted_funding</span>
-            <span class="tool-pill">hl_get_open_orders</span>
-            <span class="tool-pill">hl_get_positions</span>
+            <span class="tool-pill">hl_get_history</span>
+            <span class="tool-pill">hl_get_orderbook</span>
+            <span class="tool-pill">hl_get_fills</span>
+            <span class="tool-pill">hl_close_position</span>
             <span class="tool-pill">get_kol_swaps</span>
             <span class="tool-pill">search_tokens</span>
             <span class="tool-pill">get_token_info</span>
             <span class="tool-pill">audit_token</span>
             <span class="tool-pill">get_portfolio</span>
+        </div>
+        <div style="margin-top:12px;font-size:0.76rem;font-weight:700;color:{COLORS["up"]};letter-spacing:0.06em;
+            text-transform:uppercase;margin-bottom:6px;">New in v6: Execution quality tools</div>
+        <div style="font-size:0.82rem;color:{COLORS["muted"]};line-height:1.5;">
+            <strong style="color:{COLORS["text"]};">hl_get_history</strong> &mdash; OHLCV candles for ATR-based dynamic stops &bull;
+            <strong style="color:{COLORS["text"]};">hl_get_orderbook</strong> &mdash; L2 depth for pre-trade liquidity checks &bull;
+            <strong style="color:{COLORS["text"]};">hl_get_fills</strong> &mdash; Fill confirmation &amp; slippage tracking &bull;
+            <strong style="color:{COLORS["text"]};">hl_close_position</strong> &mdash; Atomic position closing (no dust)
         </div>
     </div>
     """,
@@ -305,12 +315,12 @@ steps = [
      "token trends, and cross-chain prices every 45s-5m."),
     ("Phase 2", "Analyze", "Gemini 2.5 Flash evaluates each signal using all 85 Boba tools. "
      "Returns conviction score, direction, asset, and sizing."),
-    ("Phase 3", "Risk Gate", "Deterministic checks enforce position limits, margin, "
-     "stop-loss/take-profit, and max exposure. No LLM can override."),
-    ("Phase 4", "Execute", "Trades are placed on Hyperliquid perps via Boba's hl_place_order "
-     "with automatic SL and TP orders."),
-    ("Phase 5", "Manage", "Open positions are monitored every cycle. Auto-close on SL/TP hit "
-     "or after 4 hours. PnL is tracked per trade."),
+    ("Phase 3", "Risk Gate", "Drawdown breaker, margin checks, position limits, orderbook "
+     "liquidity verification. 5 layers, no LLM override."),
+    ("Phase 4", "Execute", "Orderbook depth check, market order, fill confirmation with "
+     "slippage tracking, ATR-based SL/TP orders."),
+    ("Phase 5", "Manage", "ATR-aware trailing stops, hl_close_position for clean exits, "
+     "AI-assisted hold/close decisions, 8h safety net."),
 ]
 
 cols = st.columns(9)  # 5 steps + 4 arrows
@@ -345,33 +355,33 @@ st.markdown(
 strategies = [
     (
         "Prediction Market Signals",
-        "Scans Polymarket for 3%+ price moves on crypto-related prediction markets. "
+        "Scans Polymarket for 5%+ price moves on crypto prediction markets. "
         "Interprets sentiment shifts and trades directionally on Hyperliquid perps.",
-        "pm_search_markets, pm_get_price_history",
+        "pm_search_markets, pm_get_price_history, pm_get_top_holders",
     ),
     (
         "KOL Whale Tracking",
-        "Monitors smart-money wallets for trades >$100. When a whale trades an asset "
-        "in the same direction as a signal, conviction gets a +15% boost.",
+        "Monitors 429 smart-money wallets for trades >$500. When a whale trades the "
+        "same asset in the same direction, conviction gets a +10% boost.",
         "get_kol_swaps",
     ),
     (
         "Funding Rate Arbitrage",
-        "Detects when Hyperliquid funding rates diverge >0.01% from other exchanges. "
-        "Trades the spread before rates converge.",
+        "Detects when Hyperliquid funding rates diverge >0.01% from Binance/Bybit. "
+        "Creates synthetic signal with conviction scaled to rate differential.",
         "hl_get_predicted_funding",
     ),
     (
         "Token Discovery",
-        "Finds tokens with >50% 24h change and >$100k volume. Evaluates momentum "
-        "and security before recommending a trade.",
+        "Finds tokens with >50% 24h change and >$100k volume. Security audit "
+        "required before any trade is considered.",
         "search_tokens, get_token_info, audit_token",
     ),
     (
-        "Cross-Chain Arbitrage",
-        "Identifies 0.3%+ price differences for the same token across blockchains. "
-        "Surfaces opportunities before the spread closes.",
-        "cross-chain price tools",
+        "Execution Quality",
+        "Every trade goes through pre-entry orderbook depth check, post-fill "
+        "slippage tracking, and ATR-based volatility-aware stop placement.",
+        "hl_get_orderbook, hl_get_fills, hl_get_history",
     ),
 ]
 
@@ -407,11 +417,12 @@ arch_items = [
      "85 Boba tools. Returns structured JSON decisions with conviction scores."),
     ("Event Bus", "asyncio.Queue connects 6 independent triggers to a single agent loop. "
      "Events are processed in order with backpressure handling."),
-    ("Risk Engine", "Pure Python, zero LLM involvement. Enforces margin checks, position "
-     "limits, stop-loss/take-profit, max exposure, and trade minimums ($15)."),
+    ("Risk Engine", "5-layer institutional-grade controls: drawdown circuit breaker (halt at "
+     "-20%), ATR-based dynamic stops, orderbook liquidity gates, margin limits, fill tracking. "
+     "Zero LLM involvement — pure deterministic enforcement."),
     ("Database", "SQLite with WAL mode. 7 tables, 7 indexes. Handles concurrent reads "
      "from the dashboard and writes from the agent without locks."),
-    ("Dashboard", "Streamlit + Plotly. 5 interactive pages with dark theme, auto-refresh "
+    ("Dashboard", "Streamlit + Plotly. 6 interactive pages with dark theme, auto-refresh "
      "every 10s. Real-time portfolio tracking and signal visualization."),
     ("Deployment", "Docker multi-stage build (Node.js + Python). docker-compose runs "
      "agent and dashboard as separate services. Production-ready."),
@@ -468,15 +479,17 @@ st.markdown("<br>", unsafe_allow_html=True)
 # =============================================================================
 
 st.markdown(
-    '<div class="section-label">RISK PARAMETERS</div>', unsafe_allow_html=True
+    '<div class="section-label">RISK MANAGEMENT — 5 LAYERS</div>', unsafe_allow_html=True
 )
 
-r1, r2, r3, r4 = st.columns(4)
+# Row 1: Core risk parameters
+r1, r2, r3, r4, r5 = st.columns(5)
 risk_params = [
-    ("4%", "Stop-Loss", "Auto-exit losing trades at 4% drawdown", r1),
-    ("10%", "Take-Profit", "Lock in gains at 10% price target", r2),
+    ("ATR", "Dynamic Stops", "SL/TP scale with each asset's volatility via hl_get_history candles", r1),
+    ("20%", "Drawdown Halt", "Portfolio circuit breaker halts all trading, 6h cooldown", r2),
     ("3x", "Max Leverage", "Hard cap on leverage, enforced in code", r3),
-    ("4h", "Max Hold Time", "Positions auto-close after 4 hours", r4),
+    ("$500", "Depth Check", "Orderbook must have $500+ liquidity before entry", r4),
+    ("0.3%", "Max Slippage", "Rejects trades with estimated slippage above threshold", r5),
 ]
 
 for val, label, desc, col in risk_params:
@@ -491,6 +504,63 @@ for val, label, desc, col in risk_params:
             f'{desc}</div></div>',
             unsafe_allow_html=True,
         )
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# Risk layers detail
+st.markdown(
+    f"""
+    <div style="background:{COLORS["card"]};border:1px solid {COLORS["border"]};
+        border-radius:14px;padding:22px 28px;">
+        <div style="font-weight:700;font-size:1rem;color:{COLORS["text"]};margin-bottom:14px;">
+            Institutional-Grade Execution Pipeline
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">
+            <div style="text-align:center;">
+                <div style="font-size:0.72rem;font-weight:700;color:{COLORS["accent"]};
+                    letter-spacing:0.06em;margin-bottom:6px;">LAYER 1</div>
+                <div style="font-size:0.82rem;font-weight:700;color:{COLORS["text"]};">
+                    Drawdown Breaker</div>
+                <div style="font-size:0.74rem;color:{COLORS["muted"]};line-height:1.4;">
+                    10% DD: halve sizes<br>20% DD: halt + 6h cooldown</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="font-size:0.72rem;font-weight:700;color:{COLORS["accent"]};
+                    letter-spacing:0.06em;margin-bottom:6px;">LAYER 2</div>
+                <div style="font-size:0.82rem;font-weight:700;color:{COLORS["text"]};">
+                    Margin &amp; Limits</div>
+                <div style="font-size:0.74rem;color:{COLORS["muted"]};line-height:1.4;">
+                    20% cash reserve<br>25% max per trade<br>5 concurrent max</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="font-size:0.72rem;font-weight:700;color:{COLORS["accent"]};
+                    letter-spacing:0.06em;margin-bottom:6px;">LAYER 3</div>
+                <div style="font-size:0.82rem;font-weight:700;color:{COLORS["text"]};">
+                    Orderbook Gate</div>
+                <div style="font-size:0.74rem;color:{COLORS["muted"]};line-height:1.4;">
+                    hl_get_orderbook depth<br>$500 min liquidity<br>0.3% max slippage</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="font-size:0.72rem;font-weight:700;color:{COLORS["accent"]};
+                    letter-spacing:0.06em;margin-bottom:6px;">LAYER 4</div>
+                <div style="font-size:0.82rem;font-weight:700;color:{COLORS["text"]};">
+                    ATR Dynamic Stops</div>
+                <div style="font-size:0.74rem;color:{COLORS["muted"]};line-height:1.4;">
+                    hl_get_history candles<br>SL = 1.5x ATR(14)<br>TP = 3.0x ATR(14)</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="font-size:0.72rem;font-weight:700;color:{COLORS["accent"]};
+                    letter-spacing:0.06em;margin-bottom:6px;">LAYER 5</div>
+                <div style="font-size:0.82rem;font-weight:700;color:{COLORS["text"]};">
+                    Fill Confirmation</div>
+                <div style="font-size:0.74rem;color:{COLORS["muted"]};line-height:1.4;">
+                    hl_get_fills verification<br>Slippage tracking<br>SL/TP on actual fill price</div>
+            </div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -509,14 +579,17 @@ st.markdown(
         <div style="font-size:0.9rem;color:{COLORS["muted"]};line-height:1.6;max-width:700px;
             margin:0 auto 20px auto;">
             Without Boba, building SignalFlow would mean integrating Polymarket's REST API,
-            Hyperliquid's WebSocket feeds, multiple DEX SDKs, wallet indexers, and on-chain
-            data providers &mdash; each with its own auth, rate limits, and data formats.
+            Hyperliquid's WebSocket feeds, OHLCV data providers, order book depth APIs,
+            fill tracking endpoints, wallet indexers, and DEX SDKs &mdash; each with its own
+            auth, rate limits, and data formats.
             <br><br>
             With Boba, it's <strong style="color:{COLORS["text"]};">one connection, one protocol,
-            85+ tools</strong>. The AI agent calls <code style="color:{COLORS["accent"]};">
-            pm_search_markets</code> to scan predictions, <code style="color:{COLORS["accent"]};">
-            hl_place_order</code> to trade perps, and <code style="color:{COLORS["accent"]};">
-            get_kol_swaps</code> to track whales &mdash; all through the same MCP interface.
+            85+ tools</strong>. We use <code style="color:{COLORS["accent"]};">hl_get_history</code>
+            for ATR candles, <code style="color:{COLORS["accent"]};">hl_get_orderbook</code> for
+            liquidity checks, <code style="color:{COLORS["accent"]};">hl_get_fills</code> for
+            slippage tracking, and <code style="color:{COLORS["accent"]};">hl_close_position</code>
+            for atomic exits &mdash; all through the same MCP interface as signal detection and
+            trade execution.
         </div>
         <div style="display:inline-block;background:linear-gradient(135deg, #6c63ff, #29b6f6);
             color:#fff;font-size:0.82rem;font-weight:700;padding:8px 24px;border-radius:8px;

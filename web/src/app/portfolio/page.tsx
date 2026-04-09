@@ -12,7 +12,6 @@ import {
   ResponsiveContainer,
   CartesianGrid,
   ReferenceLine,
-  Legend,
 } from "recharts";
 import {
   getStats,
@@ -628,22 +627,33 @@ export default function PortfolioPage() {
                     isAnimationActive={false}
                   />
 
-                  <Legend
-                    verticalAlign="bottom"
-                    iconSize={10}
-                    wrapperStyle={{
-                      fontSize: 11,
-                      color: COLORS.text2,
-                      paddingTop: 16,
-                      ...INTER,
-                    }}
-                  />
+                  {/* Recharts auto-legend removed — custom position legend below is better */}
                 </ComposedChart>
               </ResponsiveContainer>
 
-              {/* Position legend with status tags */}
-              {positionIds.length > 0 && (
-                <div className="mt-4 flex flex-wrap gap-2">
+              {/* Position legend with wallet balance + status tags */}
+              <div className="mt-4 flex flex-wrap gap-2">
+                  {/* Wallet balance badge — always first */}
+                  <div
+                    className="flex items-center gap-1.5 px-2.5 py-1 bg-[#1e1d21] border border-[#3c3a41] rounded-lg text-xs"
+                    style={INTER}
+                  >
+                    <span className="w-3 h-0.5 rounded-full inline-block" style={{ background: COLORS.brand }} />
+                    <span className="font-semibold text-white">Wallet Balance</span>
+                    <span className={pnlClass(stats?.total_pnl ?? 0)}>
+                      {fmtUsd(STARTING_BALANCE + (stats?.total_pnl ?? 0))}
+                    </span>
+                  </div>
+                  {/* BUY/SELL marker badges */}
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[#1e1d21] border border-[#3c3a41] rounded-lg text-xs" style={INTER}>
+                    <span className="text-[#84f593]">▲</span>
+                    <span className="text-[#b8b5bb]">BUY</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[#1e1d21] border border-[#3c3a41] rounded-lg text-xs" style={INTER}>
+                    <span className="text-[#f2685f]">▼</span>
+                    <span className="text-[#b8b5bb]">SELL</span>
+                  </div>
+                  {/* Position badges */}
                   {positionIds.map((pid) => {
                     const pos = positionMap.get(pid);
                     if (!pos) return null;
@@ -687,9 +697,7 @@ export default function PortfolioPage() {
                     );
                   })}
                 </div>
-              )}
-            </>
-          ) : (
+            </>) : (
             <div className="py-20 text-center">
               <div className="text-2xl mb-2">📊</div>
               <p className="text-sm text-[#858189]" style={INTER}>

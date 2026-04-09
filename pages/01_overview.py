@@ -23,9 +23,12 @@ analyses = get_recent_analyses(limit=10)
 open_pos = get_open_positions()
 decisions = get_recent_decisions(limit=50)
 
-total_signals = sum(d.signals_detected for d in decisions)
-total_analyses = sum(d.analyses_produced for d in decisions)
-total_trades = sum(d.trades_executed for d in decisions)
+# Count from actual tables
+from db import _get_conn
+_c = _get_conn()
+total_signals = _c.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+total_analyses = _c.execute("SELECT COUNT(*) FROM analyses").fetchone()[0]
+total_trades = stats["total_trades"]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEADER
@@ -159,7 +162,8 @@ with left_col:
         for s in signals[:8]:
             direction_str = "+" if s.price_change_pct >= 0 else ""
             color = COLORS["up"] if s.price_change_pct >= 0 else COLORS["down"]
-            ago = (datetime.utcnow() - s.detected_at).total_seconds() / 60
+            det = s.detected_at.replace(tzinfo=None) if s.detected_at.tzinfo else s.detected_at
+            ago = (datetime.utcnow() - det).total_seconds() / 60
             st.markdown(
                 f'<div style="background:{COLORS["card"]};border-left:3px solid {COLORS["accent"]};'
                 f'border-radius:8px;padding:10px 14px;margin-bottom:6px;">'

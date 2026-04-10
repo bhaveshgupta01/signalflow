@@ -421,6 +421,87 @@ def get_stats() -> dict:
     }
 
 
+def get_performance_context(asset: str, direction: str, days: int = 7) -> dict:
+    """Return historical performance for similar trades — used for AI learning loop.
+
+    Returns counts and PnL stats for:
+      - Same asset + same direction (most specific)
+      - Same asset (any direction)
+      - Same direction (any asset)
+      - All trades in the period
+    Plus the 3 most recent similar trades with their AI reasoning for context.
+    """
+    conn = _get_conn()
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    asset_u = asset.upper()
+    dir_l = direction.lower()
+
+    def _stats(query: str, params: tuple) -> dict:
+        rows = conn.execute(query, params).fetchall()
+        if not rows:
+            return {"trades": 0, "wins": 0, "win_rate": 0.0, "total_pnl": 0.0, "avg_pnl": 0.0}
+        wins = sum(1 for r in rows if r["pnl"] > 0)
+        total_pnl = sum(r["pnl"] for r in rows)
+        return {
+            "trades": len(rows),
+            "wins": wins,
+            "win_rate": round(wins / len(rows) * 100, 1),
+            "total_pnl": round(total_pnl, 2),
+            "avg_pnl": round(total_pnl / len(rows), 3),
+        }
+
+    # Same asset + direction (most relevant)
+    exact = _stats(
+        "SELECT pnl FROM positions WHERE UPPER(asset)=? AND direction=? "
+        "AND status!='open' AND opened_at >= ?",
+        (asset_u, dir_l, cutoff),
+    )
+    # Same asset
+    same_asset = _stats(
+        "SELECT pnl FROM positions WHERE UPPER(asset)=? AND status!='open' AND opened_at >= ?",
+        (asset_u, cutoff),
+    )
+    # Same direction
+    same_dir = _stats(
+        "SELECT pnl FROM positions WHERE direction=? AND status!='open' AND opened_at >= ?",
+        (dir_l, cutoff),
+    )
+    # All trades in period
+    overall = _stats(
+        "SELECT pnl FROM positions WHERE status!='open' AND opened_at >= ?",
+        (cutoff,),
+    )
+
+    # Recent similar trades with reasoning (most useful for AI to learn from)
+    recent_rows = conn.execute(
+        """SELECT p.asset, p.direction, p.pnl, p.status, p.opened_at,
+                  a.reasoning, a.conviction_score, a.risk_notes
+           FROM positions p
+           LEFT JOIN analyses a ON a.id = p.analysis_id
+           WHERE UPPER(p.asset)=? AND p.direction=? AND p.status!='open'
+             AND p.opened_at >= ?
+           ORDER BY p.opened_at DESC LIMIT 3""",
+        (asset_u, dir_l, cutoff),
+    ).fetchall()
+    recent = [
+        {
+            "pnl": round(r["pnl"], 2),
+            "status": r["status"],
+            "conviction": round(r["conviction_score"] or 0, 2),
+            "reasoning": (r["reasoning"] or "")[:200],
+        }
+        for r in recent_rows
+    ]
+
+    return {
+        "exact_match": exact,       # same asset + same direction
+        "same_asset": same_asset,   # same asset only
+        "same_direction": same_dir, # same direction only
+        "overall": overall,         # all trades
+        "recent_similar": recent,   # last 3 trades with reasoning
+    }
+
+
 # ── Trade Events (for chart annotations) ────────────────────────────────────
 
 def get_trade_events(minutes: int = 999999) -> list[dict]:

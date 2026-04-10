@@ -27,6 +27,7 @@ from config import (
 )
 from db import (
     get_open_positions,
+    get_performance_context,
     get_stats,
     save_analysis,
     save_decision,
@@ -120,10 +121,12 @@ Return JSON (no markdown fences):
 - 0.9-1.0: Exceptional edge, rare. Max size with tight invalidation.
 
 ## Sizing Guide (based on current ~$90 portfolio)
-- 0.4 conviction = $10-15 (exploratory)
-- 0.5 conviction = $15-25 (standard)
-- 0.7 conviction = $25-40 (high conviction)
-- 0.9 conviction = $40-60 (max conviction)
+You are sizing the NOTIONAL exposure (post-leverage). The risk engine will cap if needed.
+- 0.4 conviction = $30-40 (exploratory but meaningful)
+- 0.5 conviction = $45-60 (standard size)
+- 0.7 conviction = $70-100 (high conviction, push it)
+- 0.9 conviction = $120-180 (max conviction, full size)
+Tiny bets like $10-15 don't compound. Be willing to size up when the edge is real.
 
 ## Key Rules
 - Use the available tools aggressively to gather data before deciding.
@@ -330,6 +333,86 @@ def _save_snapshot():
     ))
 
 
+# ── Learning Loop: Historical Performance Context ────────────────────────────
+
+# Common crypto assets that might appear in Polymarket questions
+_KNOWN_ASSETS = [
+    "BTC", "ETH", "SOL", "DOGE", "ARB", "AVAX", "LINK", "OP", "SUI", "MATIC",
+    "BNB", "XRP", "ADA", "LTC", "ATOM", "NEAR", "INJ", "TIA", "SEI", "APT",
+]
+
+_ASSET_KEYWORDS = {
+    "BTC": ["bitcoin", "btc"],
+    "ETH": ["ethereum", "eth", "ether"],
+    "SOL": ["solana", "sol"],
+    "DOGE": ["dogecoin", "doge"],
+    "ARB": ["arbitrum", "arb"],
+    "AVAX": ["avalanche", "avax"],
+    "LINK": ["chainlink", "link"],
+    "OP": ["optimism", "op"],
+    "MATIC": ["polygon", "matic"],
+    "XRP": ["ripple", "xrp"],
+}
+
+
+def _detect_likely_assets(question: str, category: str) -> list[str]:
+    """Extract likely asset symbols from a Polymarket question/category."""
+    text = (question + " " + category).lower()
+    found: list[str] = []
+    for asset, keywords in _ASSET_KEYWORDS.items():
+        if any(kw in text for kw in keywords):
+            found.append(asset)
+    return found or ["BTC"]   # default to BTC if nothing detected
+
+
+def _format_perf(perf: dict, label: str) -> str:
+    """Format a performance bucket as a one-line summary."""
+    s = perf
+    if s["trades"] == 0:
+        return f"  • {label}: no history"
+    return (
+        f"  • {label}: {s['trades']} trades, "
+        f"{s['win_rate']:.0f}% win rate, "
+        f"total ${s['total_pnl']:+.2f}, "
+        f"avg ${s['avg_pnl']:+.3f}/trade"
+    )
+
+
+def _build_learning_context(question: str, category: str) -> str:
+    """Build the historical-performance section injected into the analysis prompt."""
+    assets = _detect_likely_assets(question, category)
+    primary = assets[0]
+
+    lines = ["\n## Your Recent Performance (last 7 days) — LEARN FROM THIS"]
+
+    # Long perf for primary asset
+    long_perf = get_performance_context(primary, "long", days=7)
+    lines.append(f"\n{primary} LONG:")
+    lines.append(_format_perf(long_perf["exact_match"], "exact pattern"))
+
+    # Short perf for primary asset
+    short_perf = get_performance_context(primary, "short", days=7)
+    lines.append(f"\n{primary} SHORT:")
+    lines.append(_format_perf(short_perf["exact_match"], "exact pattern"))
+
+    # Overall + same-direction context (use long_perf since they share overall stats)
+    lines.append("")
+    lines.append(_format_perf(long_perf["overall"], "ALL trades 7d"))
+
+    # Recent similar trades with reasoning — most useful learning signal
+    recent = long_perf["recent_similar"][:2] + short_perf["recent_similar"][:2]
+    if recent:
+        lines.append(f"\nLast few {primary} trades (with reasoning):")
+        for r in recent[:3]:
+            outcome = "WIN" if r["pnl"] > 0 else "LOSS"
+            lines.append(
+                f"  • {outcome} ${r['pnl']:+.2f} (conv {r['conviction']:.2f}): "
+                f"{r['reasoning'][:120]}"
+            )
+
+    return "\n".join(lines)
+
+
 # ── Phase 2: LLM Analysis ────────────────────────────────────────────────────
 
 async def _analyze_signal(
@@ -398,6 +481,10 @@ async def _analyze_signal(
                 "If spot is stable/rising, the signal may be weak — adjust conviction accordingly."
             )
 
+    # ── LEARNING LOOP: inject historical performance for the likely asset ──
+    # Detect mentioned assets in the signal so we can show how past similar trades did
+    learning_context = _build_learning_context(signal.market_question, signal.category)
+
     user_msg = (
         f"Analyze this prediction market signal:\n"
         f"- Market: {signal.market_question}\n"
@@ -405,8 +492,12 @@ async def _analyze_signal(
         f"- Current price/probability: {signal.current_price:.3f}\n"
         f"- Category: {signal.category}\n"
         f"{interpretation_hint}\n"
-        f"{sentiment_context}\n\n"
-        f"Use the tools to gather Hyperliquid and Polymarket data, then return your JSON analysis."
+        f"{sentiment_context}\n"
+        f"{learning_context}\n\n"
+        f"Use the tools to gather Hyperliquid and Polymarket data, then return your JSON analysis. "
+        f"IMPORTANT: Factor in the historical performance above. If past similar trades have lost money, "
+        f"either (a) lower conviction, (b) flip direction, or (c) skip. If past trades have won, "
+        f"increase conviction and size up. Learn from the pattern."
     )
 
     try:

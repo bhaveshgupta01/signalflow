@@ -38,8 +38,8 @@ from models import Direction
 
 logger = logging.getLogger(__name__)
 
-CASH_RESERVE_PCT = 0.10    # keep 10% of balance free (was 20% — too conservative for $90 portfolio)
-MAX_PER_TRADE_PCT = 0.30   # max 30% of balance on one trade (was 25%)
+CASH_RESERVE_PCT = 0.10    # keep 10% of balance free
+MAX_PER_TRADE_PCT = 0.40   # max 40% of balance margin on one trade
 
 # Track peak balance for drawdown calculation (in-memory, resets on restart)
 _peak_balance: float = PAPER_WALLET_STARTING_BALANCE
@@ -530,12 +530,16 @@ def calculate_position_size(conviction: float, suggested_size: float) -> float:
     reserved = balance * CASH_RESERVE_PCT
     available = balance - used_margin - reserved
 
-    # Scale by conviction
-    sized = suggested_size * conviction
+    # Trust the LLM's size — it already factored conviction into its suggestion.
+    # Only apply a small dampener for very low conviction (<0.5) to be safe.
+    if conviction < 0.5:
+        sized = suggested_size * 0.85   # mild dampening for weak edges
+    else:
+        sized = suggested_size           # trust the LLM for moderate+ conviction
 
-    # Cap at 25% of total balance (margin, before leverage)
+    # Cap at MAX_PER_TRADE_PCT of total balance (margin, before leverage)
     max_margin = balance * MAX_PER_TRADE_PCT
-    # Apply leverage (assume 3x) to get exposure
+    # Apply leverage (assume 3x avg) to get max exposure
     capped = min(sized, max_margin * 3)
 
     # Also cap by what's actually available

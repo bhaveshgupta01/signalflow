@@ -34,9 +34,10 @@ git checkout v1-baseline-pre-strategy-rewrite
 
 ---
 
-## v2-fixed-fractional-multi-source (target tag: `v2-fixed-fractional`)
+## v2-fixed-fractional (tag: `v2-fixed-fractional` @ commit `7a160eb`)
 
-**Date:** 2026-04-11 (in progress)
+**Date frozen:** 2026-04-11
+**Wallet at commit:** $82.74 (rolled forward from v1)
 
 **Strategy summary:**
 - **Sizing:** Fixed-fractional 1.5% wallet risk per trade. `size = (risk$ / stop_distance) × leverage`. No more conviction → notional table.

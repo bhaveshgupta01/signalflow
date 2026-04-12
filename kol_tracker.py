@@ -158,24 +158,34 @@ def _extract_size(swap: dict) -> float:
 
 
 def _infer_direction(swap: dict) -> Direction:
-    """Infer trade direction from swap data.
+    """Infer trade direction from swap data — for the *traded* (non-native) asset.
 
-    Boba format: type is "BUY_WITH_NATIVE" or "SELL_FOR_NATIVE"
-    BUY_WITH_NATIVE = selling SOL to buy a token = bullish on the token
-    SELL_FOR_NATIVE = selling a token for SOL = bearish on the token (bullish SOL)
+    Boba format: type is "BUY_WITH_NATIVE" or "SELL_FOR_NATIVE".
+    The asset extracted by _extract_asset is the non-stable, non-native token
+    (or the native asset itself if the trade is against a stablecoin).
+
+    BUY = bullish on the asset being acquired
+    SELL = bearish on the asset being disposed of
     """
     swap_type = str(swap.get("type", swap.get("side", swap.get("action", "")))).upper()
 
+    # Explicit BUY/SELL
     if "BUY" in swap_type:
-        # They're buying a token with SOL/native — bullish on the ecosystem
         return Direction.LONG
     if "SELL" in swap_type:
-        # They're selling a token for SOL/native — could be taking profit
-        # but they're accumulating SOL, so bullish on SOL
-        return Direction.LONG  # selling memecoins = accumulating SOL = bullish
+        return Direction.SHORT
 
-    # Fallback
+    # Fallback — common side strings
     side = swap_type.lower()
     if side in ("buy", "long", "bid"):
         return Direction.LONG
-    return Direction.SHORT
+    if side in ("sell", "short", "ask"):
+        return Direction.SHORT
+
+    # Last resort: infer from bought/sold field presence
+    if swap.get("bought") and not swap.get("sold"):
+        return Direction.LONG
+    if swap.get("sold") and not swap.get("bought"):
+        return Direction.SHORT
+
+    return Direction.LONG

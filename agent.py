@@ -24,6 +24,8 @@ from google.genai import types
 from config import (
     GEMINI_MODEL, CONVICTION_THRESHOLD, KOL_SIGNAL_BOOST,
     PAPER_WALLET_STARTING_BALANCE, MAX_POSITION_AGE_HOURS,
+    TRADABLE_ASSETS, ASSET_MAJORS,
+    SCORE_THRESHOLD_MAJORS, SCORE_THRESHOLD_ALTS,
 )
 from db import (
     get_open_positions,
@@ -51,17 +53,22 @@ from models import (
 )
 from risk import (
     calculate_position_size,
+    calculate_position_size_v2,
     can_open_position,
     can_open_position_for_asset,
+    chandelier_stop,
     check_drawdown,
     check_orderbook_liquidity,
     check_trade_cooldown,
     check_trend_alignment,
     clamp_leverage,
+    compute_atr,
     compute_stop_take,
     compute_stop_take_atr,
     confirm_fill_and_track_slippage,
 )
+from scoring import TradeScore, evaluate_trade
+from db import save_signal_attribution, get_position_extra
 from kol_tracker import check_kol_alignment, detect_kol_signals
 from signals import detect_signals
 
@@ -104,8 +111,8 @@ Return JSON (no markdown fences):
   "conviction": <float 0.0-1.0>,
   "direction": "long" | "short",
   "asset": "<BTC, ETH, SOL, DOGE, ARB, AVAX, LINK, etc>",
-  "suggested_size_usd": <float>,
-  "leverage": <int 1-7 — scale with conviction: 1-2x for 0.4-0.5, 3x for 0.5-0.6, 4-5x for 0.6-0.8, 5-7x for 0.8+>,
+  "suggested_size_usd": 0,
+  "leverage": <int 1-5, default 3 unless you have a strong reason>,
   "hold_hours": <float 0.5-6>,
   "reasoning": "<your thesis + edge type + what data supports it>",
   "risk_notes": "<invalidation condition + what could go wrong>",
@@ -120,13 +127,10 @@ Return JSON (no markdown fences):
 - 0.7-0.9: Strong edge, multiple factors converge. Full position.
 - 0.9-1.0: Exceptional edge, rare. Max size with tight invalidation.
 
-## Sizing Guide (based on current ~$90 portfolio)
-You are sizing the NOTIONAL exposure (post-leverage). The risk engine will cap if needed.
-- 0.4 conviction = $30-40 (exploratory but meaningful)
-- 0.5 conviction = $45-60 (standard size)
-- 0.7 conviction = $70-100 (high conviction, push it)
-- 0.9 conviction = $120-180 (max conviction, full size)
-Tiny bets like $10-15 don't compound. Be willing to size up when the edge is real.
+## Sizing (you do NOT pick the size — leave `suggested_size_usd` as 0)
+The risk engine derives notional from the actual ATR-based stop distance using
+fixed-fractional risk (1.5% of wallet per trade). Your job is direction and
+conviction only. Whatever you put in `suggested_size_usd` is ignored.
 
 ## Key Rules
 - Use the available tools aggressively to gather data before deciding.
@@ -540,11 +544,27 @@ async def _execute_trade(
     boba: BobaClient,
     analysis: Analysis,
     size_usd: float,
+    score: TradeScore | None = None,
 ) -> Position | None:
-    """Open a perps position with institutional-grade execution checks.
+    """Open a perps position with v2 execution pipeline.
 
-    Pipeline: leverage → orderbook check → ATR stops → market order → fill confirmation → SL/TP orders.
+    v2 changes:
+      - Asset whitelist enforced (rejects garbage `suggested_asset`)
+      - ATR computed once and reused for SL, TP, and chandelier
+      - Position size derived from ACTUAL stop distance (fixed-fractional)
+      - extreme_price + atr_at_entry persisted for chandelier trailing
     """
+    # ── v2: Asset whitelist gate ──
+    asset_u = (analysis.suggested_asset or "").upper()
+    if asset_u not in TRADABLE_ASSETS:
+        logger.warning(
+            "Whitelist rejected '%s' (not in TRADABLE_ASSETS) — skipping",
+            analysis.suggested_asset,
+        )
+        return None
+    # Normalize the analysis asset for downstream calls
+    analysis.suggested_asset = asset_u
+
     # Extract leverage from risk_notes
     leverage = 3
     if analysis.risk_notes and "leverage=" in analysis.risk_notes:
@@ -560,18 +580,28 @@ async def _execute_trade(
         logger.warning("Could not fetch entry price for %s", analysis.suggested_asset)
         return None
 
-    # ── NEW: Orderbook liquidity check ──
+    # ── v2: Compute ATR once, reuse for SL/TP/chandelier ──
+    atr = await compute_atr(boba, analysis.suggested_asset)
+
+    # ── ATR-based dynamic stops (no caps in v2) ──
+    stop_loss, take_profit = await compute_stop_take_atr(
+        boba, entry_price, analysis.suggested_direction, analysis.suggested_asset
+    )
+
+    # ── v2: Re-derive size from the ACTUAL stop distance (fixed-fractional risk) ──
+    stop_distance_pct = abs(entry_price - stop_loss) / entry_price if entry_price > 0 else 0.025
+    size_usd = calculate_position_size_v2(stop_distance_pct=stop_distance_pct, leverage=leverage)
+    if size_usd <= 0:
+        logger.info("v2 sizing returned 0 for %s — skipping", analysis.suggested_asset)
+        return None
+
+    # ── Orderbook liquidity check (after final size known) ──
     is_liquid, est_slippage, liq_reason = await check_orderbook_liquidity(
         boba, analysis.suggested_asset, size_usd, analysis.suggested_direction
     )
     if not is_liquid:
         logger.warning("Orderbook rejected %s: %s", analysis.suggested_asset, liq_reason)
         return None
-
-    # ── NEW: ATR-based dynamic stops (replaces fixed 5%/10%) ──
-    stop_loss, take_profit = await compute_stop_take_atr(
-        boba, entry_price, analysis.suggested_direction, analysis.suggested_asset
-    )
 
     # Direct execution via Boba
     try:
@@ -635,6 +665,28 @@ async def _execute_trade(
             take_profit=take_profit,
         )
         position = save_position(position)
+        # v2: seed chandelier extreme tracker and store ATR for trailing logic
+        from db import update_position as _upd
+        _upd(
+            position.id,
+            extreme_price=entry_price,
+            atr_at_entry=atr if atr else None,
+        )
+        # v2: persist signal attribution if scoring was used
+        if score is not None:
+            try:
+                save_signal_attribution(
+                    position.id,
+                    score_funding=score.score_funding,
+                    score_polymarket=score.score_polymarket,
+                    score_kol=score.score_kol,
+                    score_trend=score.score_trend,
+                    score_total=score.total,
+                    direction=score.direction.value,
+                    notes=" | ".join(score.notes)[:500],
+                )
+            except Exception:
+                logger.debug("Failed to save signal attribution", exc_info=True)
         logger.info(
             "Opened %s %s $%.0f @ %.4f (SL: %.2f, TP: %.2f%s)",
             position.direction.value, position.asset,
@@ -685,7 +737,18 @@ async def _manage_positions(
     client: genai.Client,
     boba: BobaClient,
 ) -> None:
-    """Smart position management — SL/TP, trailing stops, and AI-driven exit decisions."""
+    """v2 position management — purely mechanical.
+
+    Pipeline per open position:
+      1. Mark-to-market PnL + snapshot
+      2. Hard SL hit → STOPPED
+      3. Hard TP hit → CLOSED
+      4. Update extreme_price (high since entry for longs / low for shorts)
+      5. Chandelier trailing stop (only ratchets toward profit)
+      6. Hard 12h max age → close (no AI consultation)
+
+    No more AI exit calls. Winners ride to TP or chandelier; losers cut at SL.
+    """
     open_pos = get_open_positions()
     if not open_pos:
         return
@@ -717,7 +780,7 @@ async def _manage_positions(
             p.id, p.direction.value, p.asset, p.entry_price, current_price, pnl, pnl_pct, age_hours,
         )
 
-        # ── Hard stop-loss: always respected, no AI override ──
+        # ── Hard stop-loss ──
         hit_sl = (p.direction == Direction.LONG and current_price <= p.stop_loss) or \
                  (p.direction == Direction.SHORT and current_price >= p.stop_loss)
         if hit_sl:
@@ -726,7 +789,7 @@ async def _manage_positions(
             logger.info("STOP #%d %s @ $%.2f -> PnL $%+.2f", p.id, p.asset, current_price, pnl)
             continue
 
-        # ── Hard take-profit: always respected ──
+        # ── Hard take-profit ──
         hit_tp = (p.direction == Direction.LONG and current_price >= p.take_profit) or \
                  (p.direction == Direction.SHORT and current_price <= p.take_profit)
         if hit_tp:
@@ -735,114 +798,43 @@ async def _manage_positions(
             logger.info("TP #%d %s @ $%.2f -> PnL $%+.2f", p.id, p.asset, current_price, pnl)
             continue
 
-        # ── Trailing stop: profit > 5% -> lock in break-even ──
-        if pnl_pct > 5.0:
-            if p.direction == Direction.LONG and p.stop_loss < p.entry_price:
-                new_sl = p.entry_price * 1.005
+        # ── v2: Chandelier trailing stop ──
+        extra = get_position_extra(p.id)
+        prev_extreme = extra.get("extreme_price") or p.entry_price
+        atr = extra.get("atr_at_entry")
+
+        # Update extreme price for longs (highest high) / shorts (lowest low)
+        if p.direction == Direction.LONG:
+            new_extreme = max(prev_extreme, current_price)
+        else:
+            new_extreme = min(prev_extreme, current_price)
+        if new_extreme != prev_extreme:
+            update_position(p.id, extreme_price=new_extreme)
+
+        if atr and atr > 0:
+            new_sl, moved = chandelier_stop(
+                direction=p.direction,
+                entry_price=p.entry_price,
+                extreme_price=new_extreme,
+                atr=atr,
+                current_stop=p.stop_loss,
+            )
+            if moved:
                 update_position(p.id, stop_loss=new_sl)
-                logger.info("TRAIL #%d %s SL -> $%.2f (locked)", p.id, p.asset, new_sl)
-            elif p.direction == Direction.SHORT and p.stop_loss > p.entry_price:
-                new_sl = p.entry_price * 0.995
-                update_position(p.id, stop_loss=new_sl)
-                logger.info("TRAIL #%d %s SL -> $%.2f (locked)", p.id, p.asset, new_sl)
+                logger.info(
+                    "CHANDELIER #%d %s SL %.4f -> %.4f (extreme=%.4f, atr=%.4f)",
+                    p.id, p.asset, p.stop_loss, new_sl, new_extreme, atr,
+                )
 
-        # ── Extract planned hold time from risk_notes ──
-        planned_hold = MAX_POSITION_AGE_HOURS  # default
-        if p.id:
-            # Get the analysis that created this position
-            try:
-                from db import _get_conn
-                conn = _get_conn()
-                row = conn.execute(
-                    "SELECT risk_notes FROM analyses WHERE id = (SELECT analysis_id FROM positions WHERE id = ?)",
-                    (p.id,),
-                ).fetchone()
-                if row and row[0] and "hold=" in row[0]:
-                    planned_hold = float(row[0].split("hold=")[1].split("h")[0])
-            except Exception:
-                pass
-
-        # ── Planned hold time reached: ask AI if we should close or extend ──
-        if age_hours >= planned_hold:
-            try:
-                close_decision = await _should_close_position(client, boba, p, current_price, pnl, pnl_pct, age_hours)
-                if close_decision:
-                    await _close_position_on_exchange(boba, p.asset)
-                    status = PositionStatus.CLOSED if pnl >= 0 else PositionStatus.STOPPED
-                    update_position(p.id, status=status, pnl=pnl, closed_at=now)
-                    logger.info("PLANNED-EXIT #%d %s %s -> PnL $%+.2f (%.1fh, planned %.1fh) reason: %s",
-                                p.id, p.direction.value, p.asset, pnl, age_hours, planned_hold, close_decision)
-                    continue
-                else:
-                    logger.info("HOLD-EXTENDED #%d %s — AI says hold past planned %.1fh", p.id, p.asset, planned_hold)
-            except Exception:
-                # If AI check fails at planned hold time, close the position
-                await _close_position_on_exchange(boba, p.asset)
-                status = PositionStatus.CLOSED if pnl >= 0 else PositionStatus.STOPPED
-                update_position(p.id, status=status, pnl=pnl, closed_at=now)
-                logger.info("PLANNED-CLOSE #%d %s after %.1fh (planned %.1fh) -> PnL $%+.2f",
-                            p.id, p.asset, age_hours, planned_hold, pnl)
-                continue
-
-        # ── Smart exit: also check mid-way if losing badly ──
-        elif age_hours >= planned_hold * 0.5 and pnl_pct < -2.0:
-            try:
-                close_decision = await _should_close_position(client, boba, p, current_price, pnl, pnl_pct, age_hours)
-                if close_decision:
-                    await _close_position_on_exchange(boba, p.asset)
-                    status = PositionStatus.STOPPED
-                    update_position(p.id, status=status, pnl=pnl, closed_at=now)
-                    logger.info("EARLY-EXIT #%d %s %s -> PnL $%+.2f (%.1fh, losing) reason: %s",
-                                p.id, p.direction.value, p.asset, pnl, age_hours, close_decision)
-                    continue
-            except Exception:
-                pass
-
-        # ── Hard age limit: 8 hours absolute max (safety net) ──
-        if age_hours >= 8.0:
+        # ── Hard 12h max age (mechanical, no AI consult) ──
+        if age_hours >= MAX_POSITION_AGE_HOURS:
             await _close_position_on_exchange(boba, p.asset)
             status = PositionStatus.CLOSED if pnl >= 0 else PositionStatus.STOPPED
             update_position(p.id, status=status, pnl=pnl, closed_at=now)
-            logger.info("MAX-AGE #%d %s after %.1fh -> PnL $%+.2f", p.id, p.asset, age_hours, pnl)
-
-
-async def _should_close_position(
-    client: genai.Client,
-    boba: BobaClient,
-    position: Position,
-    current_price: float,
-    pnl: float,
-    pnl_pct: float,
-    age_hours: float,
-) -> str | None:
-    """Ask Gemini whether to close a position. Returns reason string if yes, None if hold/extend."""
-    prompt = (
-        f"You have an open {position.direction.value.upper()} position on {position.asset}:\n"
-        f"- Entry: ${position.entry_price:,.2f}, Current: ${current_price:,.2f}\n"
-        f"- PnL: ${pnl:+.2f} ({pnl_pct:+.1f}%)\n"
-        f"- Size: ${position.size_usd:.0f} at {position.leverage}x leverage\n"
-        f"- Age: {age_hours:.1f} hours\n"
-        f"- Stop-loss: ${position.stop_loss:,.2f}, Take-profit: ${position.take_profit:,.2f}\n\n"
-        f"Check the current market conditions using tools. Should you CLOSE this position or HOLD (extend)?\n\n"
-        f"Consider:\n"
-        f"- Is the trend still in your favor? Check current price action.\n"
-        f"- Has anything changed since entry? New signals, funding shift, whale activity?\n"
-        f"- If profitable: is there more upside or is it exhausting?\n"
-        f"- If losing: is it likely to recover or should we cut losses?\n\n"
-        f"Return JSON: {{\"action\": \"close\" or \"hold\", \"reason\": \"one sentence why\"}}"
-    )
-
-    try:
-        result = await _run_tool_loop(client, boba, SYSTEM_PROMPT, prompt, max_rounds=3)
-        parsed = _extract_json(result)
-        if parsed and isinstance(parsed, dict):
-            action = parsed.get("action", "hold").lower()
-            reason = parsed.get("reason", "")
-            if action == "close":
-                return reason or "AI decided to close"
-    except Exception:
-        pass
-    return None
+            logger.info(
+                "MAX-AGE #%d %s after %.1fh -> PnL $%+.2f",
+                p.id, p.asset, age_hours, pnl,
+            )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1025,41 +1017,46 @@ async def handle_event(client: genai.Client, boba: BobaClient, event: Event) -> 
 
     elif event.trigger == TriggerType.FUNDING_RATE_SPIKE:
         asset = event.data["asset"]
-        diff = event.data["diff"]
         hl_rate = event.data.get("hl_rate", 0)
-        logger.info("Funding spike: %s diff=%.4f%% (HL=%.4f%%)", asset, diff * 100, hl_rate * 100)
-        # Trade funding rate spikes: if HL funding is very positive, go short (longs are paying)
-        # If HL funding is very negative, go long (shorts are paying)
-        if abs(diff) > 0.0005:  # Only trade significant deviations (>0.05%)
-            direction = Direction.SHORT if hl_rate > 0 else Direction.LONG
-            synthetic_signal = Signal(
-                market_id=f"funding_{asset}_{cycle_id}",
-                market_question=f"Funding rate arbitrage: {asset} HL rate {hl_rate*100:.4f}%",
-                current_price=0.5,
-                price_change_pct=diff,
-                timeframe_minutes=120,
-                category="funding",
-            )
-            synthetic_signal = save_signal(synthetic_signal)
-            decision.signals_detected = 1
-            # Check risk before creating a synthetic analysis
-            allowed, _ = can_open_position(100, 3)
-            allowed_asset, _ = can_open_position_for_asset(asset, direction)
-            if allowed and allowed_asset:
-                analysis = Analysis(
-                    signal_id=synthetic_signal.id or 0,
-                    reasoning=f"Funding rate arbitrage: {asset} has {hl_rate*100:.4f}% HL funding vs market. Going {direction.value} to capture funding payments.",
-                    conviction_score=min(0.85, 0.6 + abs(diff) * 100),
-                    suggested_direction=direction,
-                    suggested_asset=asset,
-                    suggested_size_usd=80.0,
-                    risk_notes=f"Funding can revert quickly. Rate diff: {diff*100:.4f}%",
-                )
-                analysis = save_analysis(analysis)
-                decision.analyses_produced = 1
-                if analysis.conviction_score >= CONVICTION_THRESHOLD:
-                    final_size = calculate_position_size(analysis.conviction_score, analysis.suggested_size_usd)
-                    position = await _execute_trade(client, boba, analysis, final_size)
+        logger.info("Funding spike: %s HL=%.4f%% (extreme=%s)",
+                    asset, hl_rate * 100, event.data.get("extreme", False))
+
+        # v2: route through the multi-source scoring layer
+        score = await evaluate_trade(boba, asset, hl_funding_rate=hl_rate)
+        logger.info("SCORE %s", score.explain())
+        decision.signals_detected = 1
+        decision.analyses_produced = 1
+
+        if score.passes():
+            # Pre-trade gates
+            allowed, reason = can_open_position(50, 3)
+            if not allowed:
+                logger.warning("Funding score passed but risk blocked: %s", reason)
+            else:
+                allowed_asset, reason = can_open_position_for_asset(asset, score.direction)
+                if not allowed_asset and not reason.startswith("FLIP:"):
+                    logger.info("Funding score passed but asset blocked: %s", reason)
+                else:
+                    synthetic_signal = Signal(
+                        market_id=f"funding_{asset}_{cycle_id}",
+                        market_question=f"Funding extreme: {asset} HL {hl_rate*100:+.4f}%",
+                        current_price=0.5,
+                        price_change_pct=hl_rate,
+                        timeframe_minutes=120,
+                        category="funding",
+                    )
+                    synthetic_signal = save_signal(synthetic_signal)
+                    analysis = Analysis(
+                        signal_id=synthetic_signal.id or 0,
+                        reasoning=f"v2 multi-source: {score.explain()}",
+                        conviction_score=min(1.0, score.confidence / 3.0),
+                        suggested_direction=score.direction,
+                        suggested_asset=asset,
+                        suggested_size_usd=0.0,  # ignored — v2 derives from stop distance
+                        risk_notes=f"leverage=3 hold=4 v2_score={score.total:+.2f}",
+                    )
+                    analysis = save_analysis(analysis)
+                    position = await _execute_trade(client, boba, analysis, 0.0, score=score)
                     if position:
                         decision.trades_executed = 1
                         trade_opened = True
@@ -1099,40 +1096,68 @@ async def handle_event(client: genai.Client, boba: BobaClient, event: Event) -> 
 async def _process_signal(
     client: genai.Client, boba: BobaClient, signal: Signal
 ) -> Position | None:
-    """Process a single signal through the full pipeline: analyze -> risk -> execute.
-
-    Extracted from the ``run_cycle`` for-loop so it can be used by both the
-    legacy scheduler path and the new event-driven path.
-    """
+    """Process a Polymarket signal through analyze -> v2 score -> risk -> execute."""
     analysis = await _analyze_signal(client, boba, signal)
     if analysis is None:
         return None
 
-    # KOL conviction boost
-    kol_matches = check_kol_alignment(
-        analysis.suggested_asset, analysis.suggested_direction, minutes=60
-    )
-    if kol_matches:
-        original = analysis.conviction_score
-        analysis.conviction_score = min(
-            1.0, analysis.conviction_score + KOL_SIGNAL_BOOST
-        )
-        kol_names = ", ".join(k.kol_name for k in kol_matches[:3])
-        analysis.reasoning += (
-            f" [KOL BOOST +{KOL_SIGNAL_BOOST:.0%}: {kol_names} "
-            f"also went {analysis.suggested_direction.value} on {analysis.suggested_asset}]"
-        )
+    # ── v2: whitelist gate before any further work ──
+    asset_u = (analysis.suggested_asset or "").upper()
+    if asset_u not in TRADABLE_ASSETS:
         logger.info(
-            "KOL boost: %.2f -> %.2f (aligned with %s)",
-            original, analysis.conviction_score, kol_names,
-        )
-
-    if analysis.conviction_score < CONVICTION_THRESHOLD:
-        logger.info(
-            "Low conviction (%.2f) for %s -- skipping",
-            analysis.conviction_score, signal.market_question,
+            "Whitelist rejected '%s' from PM signal — skipping",
+            analysis.suggested_asset,
         )
         return None
+    analysis.suggested_asset = asset_u
+
+    # ── v2: multi-source scoring (funding + PM + KOL + trend) ──
+    # Try to fetch current funding rate for this asset to enrich the score.
+    hl_rate: float | None = None
+    try:
+        import json as _json
+        raw = await boba.call_tool("hl_get_predicted_funding", {})
+        data = _json.loads(raw) if isinstance(raw, str) else raw
+        rates = data if isinstance(data, list) else data.get("rates", data.get("assets", []))
+        for r in rates:
+            r_asset = (r.get("name") or r.get("asset") or r.get("coin") or "").upper()
+            if r_asset == asset_u:
+                hl_rate = float(r.get("hl", r.get("funding", 0)) or 0)
+                break
+    except Exception:
+        logger.debug("Couldn't fetch funding for %s in score", asset_u)
+
+    score = await evaluate_trade(
+        boba,
+        asset_u,
+        hl_funding_rate=hl_rate,
+        pm_price_change=signal.price_change_pct,
+        pm_direction_hint=analysis.suggested_direction,
+    )
+    logger.info("SCORE %s", score.explain())
+
+    if not score.passes():
+        logger.info(
+            "v2 score %.2f below threshold %.2f for %s — skipping",
+            score.confidence, score.threshold(), asset_u,
+        )
+        return None
+
+    # Score wins → use score's direction (may flip the LLM's call if funding/KOL/trend overwhelm)
+    if score.direction != analysis.suggested_direction:
+        logger.info(
+            "v2 score flipped direction: %s -> %s",
+            analysis.suggested_direction.value, score.direction.value,
+        )
+        analysis.suggested_direction = score.direction
+
+    # Legacy KOL boost is now redundant (score includes KOL) — skip.
+
+    if analysis.conviction_score < CONVICTION_THRESHOLD:
+        # v2: use score confidence as fallback if LLM under-rated
+        analysis.conviction_score = max(
+            analysis.conviction_score, min(1.0, score.confidence / 3.0)
+        )
 
     # Anti-churn: cooldown between trades on same asset
     allowed, reason = check_trade_cooldown(analysis.suggested_asset)
@@ -1189,14 +1214,9 @@ async def _process_signal(
         logger.warning("Token audit flagged %s as risky -- skipping", analysis.suggested_asset)
         return None
 
-    # Size and execute
-    final_size = calculate_position_size(
-        analysis.conviction_score, analysis.suggested_size_usd
-    )
-    if final_size <= 0:
-        logger.info("Position too small (dust) for %s — skipping", analysis.suggested_asset)
-        return None
-    position = await _execute_trade(client, boba, analysis, final_size)
+    # v2: _execute_trade re-derives size from the actual stop distance, so we
+    # pass 0 here. score carries the per-source attribution to be persisted.
+    position = await _execute_trade(client, boba, analysis, 0.0, score=score)
     return position
 
 

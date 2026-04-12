@@ -13,12 +13,14 @@ import logging
 from config import (
     CROSS_CHAIN_INTERVAL,
     CROSS_CHAIN_THRESHOLD,
+    FUNDING_EXTREME_THRESHOLD,
     FUNDING_RATE_THRESHOLD,
     FUNDING_TRIGGER_INTERVAL,
     KOL_TRIGGER_INTERVAL,
     POLYMARKET_TRIGGER_INTERVAL,
     PORTFOLIO_TRIGGER_INTERVAL,
     TOKEN_DISCOVERY_INTERVAL,
+    TRADABLE_ASSETS,
 )
 from event_bus import Event, EventBus, TriggerType
 from kol_tracker import detect_kol_signals
@@ -72,13 +74,20 @@ async def kol_trigger(boba: BobaClient, bus: EventBus) -> None:
 
 
 async def funding_trigger(boba: BobaClient, bus: EventBus) -> None:
-    """Polls Hyperliquid funding rates every 120s, emits when rate deviates significantly."""
+    """Poll predicted funding rates and emit on EXTREMES or cross-venue divergence.
+
+    Two trigger conditions (v2):
+      1. Extreme: |HL rate| > FUNDING_EXTREME_THRESHOLD per 8h (crowded longs/shorts)
+         → contrarian signal (fade the crowd).
+      2. Divergence: |HL − Binance| > FUNDING_RATE_THRESHOLD (legacy arb edge).
+
+    Both emit FUNDING_RATE_SPIKE events with the same shape; the agent's
+    scoring layer uses the ``hl_rate`` to derive a directional score.
+    """
     errors = 0
     while True:
         try:
             raw = await boba.call_tool("hl_get_predicted_funding", {})
-            # Parse response — look for assets where HL funding differs
-            # from Binance/Bybit by more than FUNDING_RATE_THRESHOLD
             data = json.loads(raw) if isinstance(raw, str) else raw
             rates = (
                 data
@@ -86,7 +95,17 @@ async def funding_trigger(boba: BobaClient, bus: EventBus) -> None:
                 else data.get("rates", data.get("assets", []))
             )
             for asset_rate in rates:
-                # Extract HL rate and compare to Binance/Bybit
+                asset = asset_rate.get(
+                    "name",
+                    asset_rate.get("asset", asset_rate.get("coin", "")),
+                )
+                if not asset:
+                    continue
+                asset_u = asset.upper()
+                # Only emit for assets we can actually trade
+                if asset_u not in TRADABLE_ASSETS:
+                    continue
+
                 hl_rate = float(
                     asset_rate.get("hl", asset_rate.get("funding", 0)) or 0
                 )
@@ -94,21 +113,22 @@ async def funding_trigger(boba: BobaClient, bus: EventBus) -> None:
                     asset_rate.get("binance", asset_rate.get("bin", 0)) or 0
                 )
                 diff = abs(hl_rate - binance_rate)
-                if diff > FUNDING_RATE_THRESHOLD:
-                    asset = asset_rate.get(
-                        "name",
-                        asset_rate.get("asset", asset_rate.get("coin", "")),
-                    )
-                    if asset:
-                        await bus.emit(Event(
-                            trigger=TriggerType.FUNDING_RATE_SPIKE,
-                            data={
-                                "asset": asset,
-                                "hl_rate": hl_rate,
-                                "binance_rate": binance_rate,
-                                "diff": diff,
-                            },
-                        ))
+
+                is_extreme = abs(hl_rate) > FUNDING_EXTREME_THRESHOLD
+                is_divergent = diff > FUNDING_RATE_THRESHOLD
+
+                if is_extreme or is_divergent:
+                    await bus.emit(Event(
+                        trigger=TriggerType.FUNDING_RATE_SPIKE,
+                        data={
+                            "asset": asset_u,
+                            "hl_rate": hl_rate,
+                            "binance_rate": binance_rate,
+                            "diff": diff,
+                            "extreme": is_extreme,
+                            "divergent": is_divergent,
+                        },
+                    ))
             errors = 0
         except Exception as e:
             errors += 1

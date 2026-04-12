@@ -112,8 +112,23 @@ def init_db() -> None:
             timestamp       TEXT NOT NULL
         );
 
+        -- v2: per-trade signal attribution so we can measure which edge actually pays
+        CREATE TABLE IF NOT EXISTS signal_attribution (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            position_id      INTEGER NOT NULL REFERENCES positions(id),
+            score_funding    REAL DEFAULT 0.0,
+            score_polymarket REAL DEFAULT 0.0,
+            score_kol        REAL DEFAULT 0.0,
+            score_trend      REAL DEFAULT 0.0,
+            score_total      REAL DEFAULT 0.0,
+            direction        TEXT NOT NULL,
+            notes            TEXT DEFAULT '',
+            created_at       TEXT NOT NULL
+        );
+
 
         CREATE INDEX IF NOT EXISTS idx_analyses_signal_id ON analyses(signal_id);
+        CREATE INDEX IF NOT EXISTS idx_signal_attribution_position_id ON signal_attribution(position_id);
         CREATE INDEX IF NOT EXISTS idx_positions_analysis_id ON positions(analysis_id);
         CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
         CREATE INDEX IF NOT EXISTS idx_position_snapshots_position_id ON position_snapshots(position_id);
@@ -121,6 +136,16 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_signals_detected_at ON signals(detected_at);
         CREATE INDEX IF NOT EXISTS idx_kol_signals_detected_at ON kol_signals(detected_at);
     """)
+
+    # v2 ALTERs (idempotent — guarded by PRAGMA check)
+    existing_cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(positions)").fetchall()
+    }
+    if "extreme_price" not in existing_cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN extreme_price REAL")
+    if "atr_at_entry" not in existing_cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN atr_at_entry REAL")
     conn.commit()
 
 
@@ -205,7 +230,9 @@ def save_position(p: Position) -> Position:
 
 def update_position(position_id: int, *, status: Optional[PositionStatus] = None,
                      pnl: Optional[float] = None, closed_at: Optional[datetime] = None,
-                     stop_loss: Optional[float] = None) -> None:
+                     stop_loss: Optional[float] = None,
+                     extreme_price: Optional[float] = None,
+                     atr_at_entry: Optional[float] = None) -> None:
     conn = _get_conn()
     updates: list[str] = []
     params: list = []
@@ -221,11 +248,85 @@ def update_position(position_id: int, *, status: Optional[PositionStatus] = None
     if stop_loss is not None:
         updates.append("stop_loss = ?")
         params.append(stop_loss)
+    if extreme_price is not None:
+        updates.append("extreme_price = ?")
+        params.append(extreme_price)
+    if atr_at_entry is not None:
+        updates.append("atr_at_entry = ?")
+        params.append(atr_at_entry)
     if not updates:
         return
     params.append(position_id)
     conn.execute(f"UPDATE positions SET {', '.join(updates)} WHERE id = ?", params)
     conn.commit()
+
+
+def get_position_extra(position_id: int) -> dict:
+    """Return v2-only fields for a position (extreme_price, atr_at_entry)."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT extreme_price, atr_at_entry FROM positions WHERE id = ?",
+        (position_id,),
+    ).fetchone()
+    if not row:
+        return {"extreme_price": None, "atr_at_entry": None}
+    return {
+        "extreme_price": row["extreme_price"],
+        "atr_at_entry": row["atr_at_entry"],
+    }
+
+
+# ── Signal Attribution (v2) ──────────────────────────────────────────────────
+
+def save_signal_attribution(
+    position_id: int,
+    *,
+    score_funding: float = 0.0,
+    score_polymarket: float = 0.0,
+    score_kol: float = 0.0,
+    score_trend: float = 0.0,
+    score_total: float = 0.0,
+    direction: str = "long",
+    notes: str = "",
+) -> None:
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO signal_attribution
+           (position_id, score_funding, score_polymarket, score_kol,
+            score_trend, score_total, direction, notes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (position_id, score_funding, score_polymarket, score_kol,
+         score_trend, score_total, direction, notes,
+         datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+
+
+def get_attribution_summary(days: int = 7) -> dict:
+    """Return per-source PnL contribution over the last N days.
+
+    For each closed position with attribution, we compute the proportion of
+    score that came from each source and multiply by the realized PnL.
+    """
+    conn = _get_conn()
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        """SELECT sa.score_funding, sa.score_polymarket, sa.score_kol,
+                  sa.score_trend, sa.score_total, p.pnl
+           FROM signal_attribution sa
+           JOIN positions p ON p.id = sa.position_id
+           WHERE p.status != 'open' AND p.opened_at >= ?""",
+        (cutoff,),
+    ).fetchall()
+    out = {"funding": 0.0, "polymarket": 0.0, "kol": 0.0, "trend": 0.0, "trades": 0}
+    for r in rows:
+        total = abs(r["score_total"]) or 1.0
+        out["funding"] += abs(r["score_funding"]) / total * r["pnl"]
+        out["polymarket"] += abs(r["score_polymarket"]) / total * r["pnl"]
+        out["kol"] += abs(r["score_kol"]) / total * r["pnl"]
+        out["trend"] += abs(r["score_trend"]) / total * r["pnl"]
+        out["trades"] += 1
+    return out
 
 
 def get_open_positions() -> list[Position]:

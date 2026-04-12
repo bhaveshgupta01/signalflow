@@ -22,6 +22,8 @@ from config import (
     ATR_PERIOD,
     ATR_SL_MULTIPLIER,
     ATR_TP_MULTIPLIER,
+    CHANDELIER_ACTIVATION_ATR,
+    CHANDELIER_ATR_MULT,
     DEFAULT_STOP_LOSS_PCT,
     DEFAULT_TAKE_PROFIT_PCT,
     DRAWDOWN_COOLDOWN_HOURS,
@@ -31,15 +33,17 @@ from config import (
     MIN_ORDERBOOK_DEPTH_USD,
     PAPER_WALLET_STARTING_BALANCE,
     MAX_CONCURRENT_POSITIONS,
+    MAX_SINGLE_POSITION_PCT,
     MIN_FLIP_INTERVAL_MINUTES,
+    RISK_PCT_PER_TRADE,
 )
 from db import get_open_positions, get_stats
 from models import Direction
 
 logger = logging.getLogger(__name__)
 
-CASH_RESERVE_PCT = 0.10    # keep 10% of balance free
-MAX_PER_TRADE_PCT = 0.40   # max 40% of balance margin on one trade
+CASH_RESERVE_PCT = 0.10                  # keep 10% of balance free
+MAX_PER_TRADE_PCT = MAX_SINGLE_POSITION_PCT  # hard cap on per-trade notional fraction (v2: 30%)
 
 # Track peak balance for drawdown calculation (in-memory, resets on restart)
 _peak_balance: float = PAPER_WALLET_STARTING_BALANCE
@@ -119,12 +123,10 @@ async def compute_stop_take_atr(
     atr = await compute_atr(boba, asset)
 
     if atr is not None and atr > 0:
-        # ATR-based: stops scale with actual asset volatility
-        # Cap SL at 5% and TP at 12% of entry price to avoid absurdly wide stops on BTC
-        max_sl_dist = entry_price * 0.05
-        max_tp_dist = entry_price * 0.12
-        sl_dist = min(atr * sl_mult, max_sl_dist)
-        tp_dist = min(atr * tp_mult, max_tp_dist)
+        # v2: honest ATR stops with NO arbitrary cap. Tight SL, fat TP.
+        # Hard floor: SL must be at least 0.5% to avoid noise stops; TP must be at least 1.5%.
+        sl_dist = max(atr * sl_mult, entry_price * 0.005)
+        tp_dist = max(atr * tp_mult, entry_price * 0.015)
         if direction == Direction.LONG:
             stop_loss = entry_price - sl_dist
             take_profit = entry_price + tp_dist
@@ -519,7 +521,39 @@ def can_open_position_for_asset(asset: str, direction: Direction) -> tuple[bool,
 
 
 def calculate_position_size(conviction: float, suggested_size: float) -> float:
-    """Size based on conviction, capped to keep cash reserve. Reduced during drawdown."""
+    """LEGACY shim — v2 uses calculate_position_size_v2.
+
+    Kept so any old call site still compiles. Routes to v2 with a synthetic
+    2.5% stop distance (matches DEFAULT_STOP_LOSS_PCT). New code MUST call
+    calculate_position_size_v2 directly with the real stop distance.
+    """
+    return calculate_position_size_v2(
+        stop_distance_pct=DEFAULT_STOP_LOSS_PCT,
+        leverage=3,
+    )
+
+
+def calculate_position_size_v2(
+    stop_distance_pct: float,
+    leverage: int = 3,
+) -> float:
+    """Fixed-fractional position sizing (v2).
+
+    notional_size = (risk_$ / stop_distance_pct) × leverage
+        where risk_$ = wallet_balance × RISK_PCT_PER_TRADE.
+
+    The trader never loses more than RISK_PCT_PER_TRADE of the wallet on a
+    single stop-out, regardless of asset volatility or leverage. Tighter stops
+    automatically scale up the position; wider stops shrink it.
+
+    Returns notional USD size (post-leverage) — the same units the rest of the
+    code uses for ``size_usd``. Returns 0.0 if the trade can't be sized
+    (drawdown halt, no balance, smaller than dust).
+    """
+    if stop_distance_pct <= 0:
+        logger.warning("calculate_position_size_v2: stop_distance_pct=%.4f <= 0", stop_distance_pct)
+        return 0.0
+
     stats = get_stats()
     balance = PAPER_WALLET_STARTING_BALANCE + stats["total_pnl"]
     if balance <= 5:
@@ -528,55 +562,98 @@ def calculate_position_size(conviction: float, suggested_size: float) -> float:
     open_positions = get_open_positions()
     used_margin = sum(p.size_usd / max(p.leverage, 1) for p in open_positions)
     reserved = balance * CASH_RESERVE_PCT
-    available = balance - used_margin - reserved
+    available_margin = max(0.0, balance - used_margin - reserved)
 
-    # Trust the LLM's size — it already factored conviction into its suggestion.
-    # Only apply a small dampener for very low conviction (<0.5) to be safe.
-    if conviction < 0.5:
-        sized = suggested_size * 0.85   # mild dampening for weak edges
-    else:
-        sized = suggested_size           # trust the LLM for moderate+ conviction
-
-    # Cap at MAX_PER_TRADE_PCT of total balance (margin, before leverage)
-    max_margin = balance * MAX_PER_TRADE_PCT
-    # Apply leverage (assume 3x avg) to get max exposure
-    capped = min(sized, max_margin * 3)
-
-    # Also cap by what's actually available
-    margin_for_capped = capped / 3  # assuming 3x leverage
-    if margin_for_capped > available:
-        capped = available * 3
+    # Core fixed-fractional formula
+    risk_dollars = balance * RISK_PCT_PER_TRADE
+    notional = (risk_dollars / stop_distance_pct) * max(leverage, 1)
 
     # Drawdown reduction: halve size if in warning zone
     _, drawdown, _ = check_drawdown()
     if drawdown >= DRAWDOWN_WARN_PCT:
-        original = capped
-        capped = capped * 0.5
-        logger.info("Drawdown size reduction: $%.2f → $%.2f (%.1f%% drawdown)", original, capped, drawdown * 100)
+        original = notional
+        notional *= 0.5
+        logger.info(
+            "Drawdown size reduction: $%.2f → $%.2f (%.1f%% drawdown)",
+            original, notional, drawdown * 100,
+        )
 
-    if capped < 8:
+    # Hard cap: notional cannot exceed MAX_PER_TRADE_PCT × balance × leverage
+    max_notional = balance * MAX_PER_TRADE_PCT * max(leverage, 1)
+    if notional > max_notional:
+        notional = max_notional
+
+    # Available-margin cap: never need more margin than we actually have free
+    margin_needed = notional / max(leverage, 1)
+    if margin_needed > available_margin:
+        notional = available_margin * max(leverage, 1)
+
+    if notional < 8:
+        logger.info(
+            "Position too small after sizing: $%.2f (risk=$%.2f, stop=%.2f%%, lev=%dx)",
+            notional, risk_dollars, stop_distance_pct * 100, leverage,
+        )
         return 0.0
-    return round(capped, 2)
+
+    logger.info(
+        "v2 sizing: $%.2f notional (risk=$%.2f @ %.1f%% stop, lev=%dx, balance=$%.2f)",
+        notional, risk_dollars, stop_distance_pct * 100, leverage, balance,
+    )
+    return round(notional, 2)
+
+
+# ── Chandelier Trailing Stop ─────────────────────────────────────────────────
+
+def chandelier_stop(
+    direction: Direction,
+    entry_price: float,
+    extreme_price: float,
+    atr: float,
+    current_stop: float,
+) -> tuple[float, bool]:
+    """Compute the new stop-loss price using a Chandelier exit.
+
+    A Chandelier stop trails behind the *highest high since entry* (for longs)
+    or *lowest low since entry* (for shorts) by ``CHANDELIER_ATR_MULT × ATR``.
+    It only activates once price has moved at least ``CHANDELIER_ACTIVATION_ATR``
+    in our favour from entry — before that, the original SL stays in place.
+
+    Returns ``(new_stop, did_move)``. Stop never loosens (only ratchets toward
+    profit), so this can be called every cycle safely.
+    """
+    if atr <= 0:
+        return current_stop, False
+
+    activation_distance = atr * CHANDELIER_ACTIVATION_ATR
+    trail_distance = atr * CHANDELIER_ATR_MULT
+
+    if direction == Direction.LONG:
+        favourable_move = extreme_price - entry_price
+        if favourable_move < activation_distance:
+            return current_stop, False
+        proposed = extreme_price - trail_distance
+        # Only move stop *up* (tighter), never down
+        if proposed > current_stop:
+            return round(proposed, 4), True
+        return current_stop, False
+    else:  # SHORT
+        favourable_move = entry_price - extreme_price
+        if favourable_move < activation_distance:
+            return current_stop, False
+        proposed = extreme_price + trail_distance
+        # For shorts, only move stop *down* (tighter)
+        if proposed < current_stop:
+            return round(proposed, 4), True
+        return current_stop, False
 
 
 def clamp_leverage(proposed: int, conviction: float = 0.5) -> int:
-    """AI-managed leverage with conviction-based caps.
+    """v2: leverage no longer scales conviction (sizing does).
 
-    Higher conviction unlocks higher leverage:
-      conviction < 0.4  → max 2x  (low confidence, keep it safe)
-      conviction 0.4-0.6 → max 3x  (moderate edge)
-      conviction 0.6-0.8 → max 5x  (strong edge, more room)
-      conviction > 0.8  → max 7x  (exceptional edge, full conviction)
+    Hard cap at 5x for safety. Min 1x. Anything in between is honored.
+    Conviction is accepted for backwards compat but ignored.
     """
-    if conviction >= 0.8:
-        max_lev = 7
-    elif conviction >= 0.6:
-        max_lev = 5
-    elif conviction >= 0.4:
-        max_lev = 3
-    else:
-        max_lev = 2
-    return max(1, min(proposed, max_lev))
+    return max(1, min(int(proposed or 3), 5))
 
 
 def get_available_margin() -> float:

@@ -72,7 +72,9 @@ async def detect_kol_signals(boba: BobaClient) -> list[KolSignal]:
     wallets_by_chain = await _refresh_wallet_cache(boba)
     total_wallets = sum(len(w) for w in wallets_by_chain.values())
     if total_wallets == 0:
-        logger.info("Smart money: no wallets discovered across %d chains", len(_SMART_MONEY_CHAINS))
+        # Only log at DEBUG to avoid per-poll spam — _refresh_wallet_cache
+        # already logs (at INFO) whenever it actually re-runs search_wallets.
+        logger.debug("Smart money: no wallets discovered across %d chains", len(_SMART_MONEY_CHAINS))
         return []
 
     # Step 2: pull recent swaps per wallet (bounded concurrency)
@@ -173,7 +175,8 @@ async def _refresh_wallet_cache(boba: BobaClient) -> dict[int, list[str]]:
 
         _wallet_cache[chain_id] = (now, wallets)
         out[chain_id] = wallets
-        logger.info("Smart money discovery: %s → %d wallets", chain_name, len(wallets))
+        # Log at INFO only when we actually ran the search (cache miss)
+        logger.info("Smart money discovery (refresh): %s → %d wallets", chain_name, len(wallets))
 
     return out
 

@@ -307,15 +307,22 @@ async def hl_whale_trigger(boba: BobaClient, bus: EventBus) -> None:
     than trade-tape churn because OI reflects *net new commitment*.
     """
     whale_assets = ["BTC", "ETH", "SOL", "DOGE", "AVAX", "LINK"]
-    # Per-asset snapshot state: {asset: (timestamp, oi_usd, mark_price)}
-    prev_state: dict[str, tuple[float, float, float]] = {}
-    min_oi_change_pct = 0.05   # 5% OI shift ⇒ meaningful
+    # Per-asset rolling window: {asset: [(timestamp, oi_usd, mark_price), ...]}
+    # We keep ~6 snapshots (~18 min at 3-min interval) and compare current to
+    # oldest-in-window. This lets delta accumulate over time — a 2% drift over
+    # 18 min is far more common (and actionable) than a 5% spike in 3 min.
+    oi_window: dict[str, list[tuple[float, float, float]]] = {}
+    WINDOW_SIZE = 6                 # ~18 minutes of snapshots
+    min_oi_change_pct = 0.02        # 2% OI shift over the full window ⇒ meaningful
+    poll_count = 0
     errors = 0
 
     while True:
         try:
             import time as _time
             now = _time.time()
+            poll_count += 1
+            emitted = 0
             for asset in whale_assets:
                 try:
                     raw = await boba.call_tool("hl_get_markets", {"search": asset, "limit": 1})
@@ -331,12 +338,16 @@ async def hl_whale_trigger(boba: BobaClient, bus: EventBus) -> None:
                     oi_units = _parse_oi(rec.get("oi"))
                     oi_usd = oi_units * mark  # OI in USD terms
 
-                    prev = prev_state.get(asset)
-                    prev_state[asset] = (now, oi_usd, mark)
-                    if not prev:
-                        continue  # first snapshot — nothing to compare yet
+                    # Update rolling window (keep last WINDOW_SIZE entries)
+                    win = oi_window.setdefault(asset, [])
+                    win.append((now, oi_usd, mark))
+                    if len(win) > WINDOW_SIZE:
+                        win.pop(0)
+                    if len(win) < 2:
+                        continue  # need at least two snapshots to compute delta
 
-                    prev_ts, prev_oi, prev_mark = prev
+                    # Compare current to OLDEST snapshot in the window
+                    prev_ts, prev_oi, prev_mark = win[0]
                     if prev_oi <= 0 or prev_mark <= 0 or mark <= 0:
                         continue
                     dt_min = (now - prev_ts) / 60.0
@@ -382,8 +393,17 @@ async def hl_whale_trigger(boba: BobaClient, bus: EventBus) -> None:
                             "sell_usd": oi_usd if direction == "short" else 0,
                         },
                     ))
+                    emitted += 1
                 except Exception as e:
                     logger.debug("HL OI poll for %s failed: %s", asset, e)
+
+            # Heartbeat: confirm trigger is alive even when no signal fires
+            if poll_count == 1 or poll_count % 5 == 0 or emitted > 0:
+                window_sizes = {a: len(v) for a, v in oi_window.items()}
+                logger.info(
+                    "HL whale poll #%d complete: emitted=%d, window_sizes=%s",
+                    poll_count, emitted, window_sizes,
+                )
             errors = 0
         except Exception as e:
             errors += 1

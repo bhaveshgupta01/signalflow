@@ -1108,6 +1108,21 @@ async def _process_signal(
     except Exception:
         logger.debug("Couldn't fetch funding for %s in score", asset_u)
 
+    # ── v2.1: BTC/ETH Polymarket gate ──
+    # Historical data (v1+v2): BTC/ETH Polymarket-driven trades lost ~$23 net.
+    # Only trade majors on Polymarket signals when funding is already extreme,
+    # i.e. PM is confirming an orthogonal edge rather than being the sole edge.
+    if asset_u in ASSET_MAJORS:
+        from config import FUNDING_EXTREME_THRESHOLD
+        has_funding_edge = hl_rate is not None and abs(hl_rate) >= FUNDING_EXTREME_THRESHOLD
+        if not has_funding_edge:
+            logger.info(
+                "BTC/ETH PM gate: %s — no funding edge (rate=%s), skipping PM-only major trade",
+                asset_u,
+                f"{hl_rate * 100:+.4f}%" if hl_rate is not None else "n/a",
+            )
+            return None
+
     score = await evaluate_trade(
         boba,
         asset_u,
@@ -1139,6 +1154,38 @@ async def _process_signal(
         analysis.conviction_score = max(
             analysis.conviction_score, min(1.0, score.confidence / 3.0)
         )
+
+    # ── v2.1: deterministic learning cap from recent same-asset/direction PnL ──
+    # Rule: if the last 10 trades of this exact pattern lost net money, cap
+    # conviction at 0.30 (discourages doubling down on a losing pattern).
+    # If they won >= +$1, give a +0.10 boost (reinforces what's working).
+    try:
+        perf = get_performance_context(
+            analysis.suggested_asset,
+            analysis.suggested_direction.value,
+            days=7,
+        )
+        exact = perf.get("exact_match", {})
+        n, total_pnl = exact.get("trades", 0), exact.get("total_pnl", 0.0)
+        if n >= 5:  # need enough sample
+            if total_pnl <= -0.5:
+                cap_before = analysis.conviction_score
+                analysis.conviction_score = min(analysis.conviction_score, 0.30)
+                logger.info(
+                    "LEARN-CAP %s %s: recent %d trades netted $%+.2f — capped conv %.2f→%.2f",
+                    analysis.suggested_asset, analysis.suggested_direction.value,
+                    n, total_pnl, cap_before, analysis.conviction_score,
+                )
+            elif total_pnl >= 1.0:
+                boost_before = analysis.conviction_score
+                analysis.conviction_score = min(1.0, analysis.conviction_score + 0.10)
+                logger.info(
+                    "LEARN-BOOST %s %s: recent %d trades netted $%+.2f — boosted conv %.2f→%.2f",
+                    analysis.suggested_asset, analysis.suggested_direction.value,
+                    n, total_pnl, boost_before, analysis.conviction_score,
+                )
+    except Exception:
+        logger.debug("Learning-cap lookup failed", exc_info=True)
 
     # Anti-churn: cooldown between trades on same asset
     allowed, reason = check_trade_cooldown(analysis.suggested_asset)

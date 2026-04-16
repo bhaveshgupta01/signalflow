@@ -65,3 +65,29 @@ git checkout v1-baseline-pre-strategy-rewrite
 ```
 git checkout v1-baseline-pre-strategy-rewrite
 ```
+
+---
+
+## v2.1-tuned (target tag: `v2.1-tuned`)
+
+**Date:** 2026-04-16
+**Wallet at freeze:** $82.79 (v2 was running v1 code in memory — see below)
+
+**Context — what actually happened between v2 commit (Apr 11) and Apr 16:**
+- The agent process kept running with v1 bytecode in memory. All 99 "v2" trades used v1 logic (5%/12% SL/TP caps, no chandelier, no attribution). `extreme_price` and `atr_at_entry` populated 0/99 times; `signal_attribution` had 0 rows.
+- v2 still beat v1 (net +$1.72 vs −$17.89) because the kol_tracker bugfix and the tighter stops helped, but the core v2 machinery never ran.
+- Commit `6711166` deleted the LLM fallback path that was masking execution failures and restarted the agent with fresh v2 code.
+
+**v2.1 changes (in progress):**
+- Lower score thresholds to reality: alts 0.8, majors 1.1 (were 1.5/1.8 and unreachable because funding+KOL typically contribute 0).
+- BTC/ETH PM gate: Polymarket signals on majors are rejected unless funding is already extreme (|HL rate| > 0.025%/8h). Evidence: BTC+ETH Polymarket-driven trades lost ~$23 net across both versions.
+- Deterministic learning cap: if last 5+ trades on same asset+direction netted ≤ −$0.50, conviction is hard-capped at 0.30 regardless of what the LLM says. If they netted ≥ +$1.00, conviction gets +0.10.
+
+**Decisions / open questions:**
+- KOL pipeline returning 0 signals since Apr 12 — need to investigate `get_kol_swaps` return shape or lower `KOL_MIN_TRADE_USD`.
+- Funding often below extreme threshold — may need a softer "warm" band (|rate| > 0.01%/8h = weak funding score ±0.3).
+
+**To roll back to v2:**
+```
+git checkout v2-fixed-fractional
+```

@@ -1,6 +1,11 @@
 #!/bin/bash
 # SignalFlow — one-command launcher
-# Starts Boba proxy, agent, and dashboard
+# Starts Boba proxy, agent, and dashboard.
+#
+# Transport: stdio via local `boba proxy`. SSE was attempted in v2.1.3 but the
+# hosted auth endpoint returns 404 and config.json lacks an accessToken, so
+# SSE is only viable after an interactive `boba login`. The proxy handles
+# auth internally, so we keep it as the default.
 
 set -e
 

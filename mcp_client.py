@@ -93,14 +93,23 @@ class BobaClient:
         self._exit_stack: AsyncExitStack | None = None
 
     async def connect(self) -> None:
-        """Connect to Boba MCP — tries stdio first, falls back to SSE."""
+        """Connect to Boba MCP — tries stdio first, falls back to SSE.
+
+        SSE is attempted last because the hosted auth endpoint
+        (krakend-skunk.up.railway.app/v2/auth/agent) currently returns 404
+        and the cached config.json does not ship an accessToken — so SSE
+        only works after an interactive `boba login`. Stdio via the local
+        proxy is what actually works for this project today.
+        """
         try:
             await self._connect_stdio()
+            logger.info("Transport: stdio (via local boba proxy)")
             return
         except Exception as e:
             logger.warning("Stdio connection failed (%s), trying SSE...", e)
 
         await self._connect_sse()
+        logger.info("Transport: SSE (direct to Boba cloud)")
 
     async def _connect_stdio(self) -> None:
         """Connect via local boba mcp command (requires proxy running)."""

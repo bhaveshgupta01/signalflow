@@ -91,3 +91,27 @@ git checkout v1-baseline-pre-strategy-rewrite
 ```
 git checkout v2-fixed-fractional
 ```
+
+---
+
+## v2.1.3-sse-attempt (reverted, kept in history)
+
+**Date:** 2026-04-16
+**Status:** Attempted and rolled back in the same session. The stdio+proxy setup is kept.
+
+**What was tried:** Flip `mcp_client.py` `connect()` to try SSE first, then fall back to stdio. Strip the proxy startup from `run.sh`. Goal was to get rid of the `script -q /dev/null` TTY workaround and the 5-99% CPU cost of the local proxy daemon.
+
+**Why it failed:** The SSE path needs a valid Boba access token. We have two sources:
+- `~/Library/Application Support/boba-cli/config.json` — **has no `accessToken` field**, only metadata (`accessTokenExpiresAt`, `agentId`, etc.). The Explore agent mis-read this file.
+- `POST https://krakend-skunk.up.railway.app/v2/auth/agent` with `BOBA_AGENT_ID` + `BOBA_AGENT_SECRET` — **returns HTTP 404**. The endpoint either moved or was never live.
+
+With no token, `_connect_sse()` raises `RuntimeError("No Boba access token")`. Stdio fallback then also failed because `boba mcp` requires the proxy to be running (which we had just removed from `run.sh`). Agent couldn't connect at all.
+
+**Lesson:** The `boba proxy` daemon isn't just operational overhead — it's the only thing that can auth against Boba's cloud in this environment. The proxy holds the refresh-token state and serves auth to `boba mcp`. Without an interactive `boba login` (device-code flow that populates the token in `config.json`), SSE is not usable from this machine.
+
+**Revisit this when:**
+- Boba publishes a working `/v2/auth/agent` endpoint with documented URL, or
+- We add a "run `boba login` first, then SSE works" flow to the launcher, or
+- We move to a deployment target where the local proxy CAN run as a daemon (a VM, not Mac).
+
+**For now:** stdio + local proxy + `script -q /dev/null` TTY wrapper remains the working transport.

@@ -16,6 +16,11 @@ from config import (
     FUNDING_EXTREME_THRESHOLD,
     FUNDING_RATE_THRESHOLD,
     FUNDING_TRIGGER_INTERVAL,
+    HL_WHALE_FLOW_IMBALANCE_RATIO,
+    HL_WHALE_LOOKBACK_TRADES,
+    HL_WHALE_MIN_FILL_USD,
+    HL_WHALE_MIN_TOTAL_USD,
+    HL_WHALE_TRIGGER_INTERVAL,
     KOL_TRIGGER_INTERVAL,
     POLYMARKET_TRIGGER_INTERVAL,
     PORTFOLIO_TRIGGER_INTERVAL,
@@ -264,6 +269,126 @@ async def cross_chain_trigger(boba: BobaClient, bus: EventBus) -> None:
         except Exception as e:
             logger.warning("Cross-chain trigger error: %s", e)
         await asyncio.sleep(CROSS_CHAIN_INTERVAL)
+
+
+def _parse_oi(val) -> float:
+    """Parse an OI string like "2.02B", "38.4M", "2.2M", "45.0K" into a float."""
+    if val is None:
+        return 0.0
+    s = str(val).strip().upper().replace(",", "").replace("$", "")
+    mult = 1.0
+    if s.endswith("B"):
+        mult = 1e9; s = s[:-1]
+    elif s.endswith("M"):
+        mult = 1e6; s = s[:-1]
+    elif s.endswith("K"):
+        mult = 1e3; s = s[:-1]
+    try:
+        return float(s) * mult
+    except ValueError:
+        return 0.0
+
+
+async def hl_whale_trigger(boba: BobaClient, bus: EventBus) -> None:
+    """Emit HL_WHALE_FLOW events from Open Interest deltas on Hyperliquid.
+
+    Hyperliquid doesn't expose a trade-tape MCP tool (only candles + funding),
+    so we infer whale positioning from OI changes. Every HL_WHALE_TRIGGER_INTERVAL
+    we snapshot OI per asset via hl_get_markets, compare against the previous
+    snapshot (kept in memory), and interpret:
+
+      OI ↑  + price ↑  →  longs opening   →  bullish
+      OI ↑  + price ↓  →  shorts opening  →  bearish
+      OI ↓  + price ↑  →  shorts covering →  bullish (short squeeze)
+      OI ↓  + price ↓  →  longs closing   →  bearish (capitulation)
+
+    Only emits when |ΔOI| >= 5% over the window — i.e. meaningful positioning
+    change, not noise. Price is compared at mark. This is a stronger signal
+    than trade-tape churn because OI reflects *net new commitment*.
+    """
+    whale_assets = ["BTC", "ETH", "SOL", "DOGE", "AVAX", "LINK"]
+    # Per-asset snapshot state: {asset: (timestamp, oi_usd, mark_price)}
+    prev_state: dict[str, tuple[float, float, float]] = {}
+    min_oi_change_pct = 0.05   # 5% OI shift ⇒ meaningful
+    errors = 0
+
+    while True:
+        try:
+            import time as _time
+            now = _time.time()
+            for asset in whale_assets:
+                try:
+                    raw = await boba.call_tool("hl_get_markets", {"search": asset, "limit": 1})
+                    data = json.loads(raw) if isinstance(raw, str) else raw
+                    assets = data.get("assets", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                    if not assets:
+                        continue
+                    rec = assets[0]
+                    if str(rec.get("name", "")).upper() != asset:
+                        continue
+
+                    mark = float(str(rec.get("mark", 0)).replace(",", ""))
+                    oi_units = _parse_oi(rec.get("oi"))
+                    oi_usd = oi_units * mark  # OI in USD terms
+
+                    prev = prev_state.get(asset)
+                    prev_state[asset] = (now, oi_usd, mark)
+                    if not prev:
+                        continue  # first snapshot — nothing to compare yet
+
+                    prev_ts, prev_oi, prev_mark = prev
+                    if prev_oi <= 0 or prev_mark <= 0 or mark <= 0:
+                        continue
+                    dt_min = (now - prev_ts) / 60.0
+
+                    oi_change = (oi_usd - prev_oi) / prev_oi
+                    price_change = (mark - prev_mark) / prev_mark
+
+                    if abs(oi_change) < min_oi_change_pct:
+                        continue  # no meaningful positioning change
+
+                    # Interpret direction
+                    oi_up = oi_change > 0
+                    price_up = price_change > 0
+                    if oi_up and price_up:
+                        direction = "long"; interp = "longs opening"
+                    elif oi_up and not price_up:
+                        direction = "short"; interp = "shorts opening"
+                    elif (not oi_up) and price_up:
+                        direction = "long"; interp = "shorts covering"
+                    else:
+                        direction = "short"; interp = "longs closing"
+
+                    logger.info(
+                        "HL whale flow %s: %s (%s) ΔOI=%+.1f%% Δpx=%+.2f%% "
+                        "(OI $%.1fM → $%.1fM, %.1fm window)",
+                        asset, direction, interp, oi_change * 100, price_change * 100,
+                        prev_oi / 1e6, oi_usd / 1e6, dt_min,
+                    )
+                    await bus.emit(Event(
+                        trigger=TriggerType.HL_WHALE_FLOW,
+                        data={
+                            "asset": asset,
+                            "direction": direction,
+                            "oi_change": oi_change,
+                            "price_change": price_change,
+                            "oi_usd": oi_usd,
+                            "prev_oi_usd": prev_oi,
+                            "mark": mark,
+                            "interpretation": interp,
+                            # Use oi_change magnitude as a "ratio-like" intensity
+                            "ratio": 1.0 + abs(oi_change) * 10,  # 5% OI ⇒ 1.5, 10% ⇒ 2.0
+                            "buy_usd": oi_usd if direction == "long" else 0,
+                            "sell_usd": oi_usd if direction == "short" else 0,
+                        },
+                    ))
+                except Exception as e:
+                    logger.debug("HL OI poll for %s failed: %s", asset, e)
+            errors = 0
+        except Exception as e:
+            errors += 1
+            logger.warning("HL whale trigger error (attempt %d): %s", errors, e)
+        await asyncio.sleep(_backoff_delay(HL_WHALE_TRIGGER_INTERVAL, errors))
 
 
 async def portfolio_trigger(boba: BobaClient, bus: EventBus):

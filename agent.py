@@ -26,6 +26,7 @@ from config import (
     PAPER_WALLET_STARTING_BALANCE, MAX_POSITION_AGE_HOURS,
     TRADABLE_ASSETS, ASSET_MAJORS,
     SCORE_THRESHOLD_MAJORS, SCORE_THRESHOLD_ALTS,
+    HL_WHALE_TRIGGER_INTERVAL,
 )
 from db import (
     get_open_positions,
@@ -1059,6 +1060,77 @@ async def handle_event(client: genai.Client, boba: BobaClient, event: Event) -> 
     elif event.trigger == TriggerType.PORTFOLIO_UPDATE:
         portfolio = event.data.get("portfolio", {})
         logger.info("Portfolio update: %s", str(portfolio)[:200])
+
+    elif event.trigger == TriggerType.HL_WHALE_FLOW:
+        # v2.2: aggregated Hyperliquid perp whale imbalance
+        asset = event.data["asset"]
+        direction = Direction(event.data["direction"])
+        ratio = event.data.get("ratio", 0)
+        buy_usd = event.data.get("buy_usd", 0)
+        sell_usd = event.data.get("sell_usd", 0)
+        logger.info(
+            "HL whale event: %s %s ratio=%.2fx ($%.0fk buy / $%.0fk sell)",
+            asset, direction.value, ratio, buy_usd / 1000, sell_usd / 1000,
+        )
+        decision.signals_detected = 1
+        decision.analyses_produced = 1
+
+        # Fetch funding to enrich the score
+        hl_rate: float | None = None
+        try:
+            raw = await boba.call_tool("hl_get_predicted_funding", {})
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            rates = data if isinstance(data, list) else data.get("rates", data.get("assets", []))
+            for r in rates:
+                r_asset = (r.get("name") or r.get("asset") or r.get("coin") or "").upper()
+                if r_asset == asset:
+                    hl_rate = float(r.get("hl", r.get("funding", 0)) or 0)
+                    break
+        except Exception:
+            pass
+
+        score = await evaluate_trade(boba, asset, hl_funding_rate=hl_rate)
+        # Boost: the whale event itself is a strong directional KOL-style signal
+        # so inject a synthetic KOL contribution based on the imbalance ratio.
+        whale_intensity = min(1.0, (ratio - 1.0) / 3.0)  # ratio=2 → 0.33, ratio=4 → 1.0
+        whale_sign = 1.0 if direction == Direction.LONG else -1.0
+        from config import SCORE_WEIGHT_KOL
+        score.score_kol = whale_sign * whale_intensity * SCORE_WEIGHT_KOL
+        score.notes.append(f"HL whale ratio={ratio:.2f}x → {score.score_kol:+.2f}")
+        logger.info("SCORE (HL whale) %s", score.explain())
+
+        if score.passes():
+            allowed, reason = can_open_position(50, 3)
+            if not allowed:
+                logger.warning("HL whale score passed but risk blocked: %s", reason)
+            else:
+                allowed_asset, reason = can_open_position_for_asset(asset, score.direction)
+                if not allowed_asset and not reason.startswith("FLIP:"):
+                    logger.info("HL whale blocked on asset: %s", reason)
+                else:
+                    synthetic_signal = Signal(
+                        market_id=f"hl_whale_{asset}_{cycle_id}",
+                        market_question=f"HL whale imbalance {ratio:.2f}x on {asset}",
+                        current_price=0.5,
+                        price_change_pct=ratio,
+                        timeframe_minutes=HL_WHALE_TRIGGER_INTERVAL // 60,
+                        category="hl_whale",
+                    )
+                    synthetic_signal = save_signal(synthetic_signal)
+                    analysis = Analysis(
+                        signal_id=synthetic_signal.id or 0,
+                        reasoning=f"v2.2 HL whale flow: {score.explain()}",
+                        conviction_score=min(1.0, score.confidence / 3.0),
+                        suggested_direction=score.direction,
+                        suggested_asset=asset,
+                        suggested_size_usd=0.0,
+                        risk_notes=f"leverage=3 hold=4 v2_score={score.total:+.2f} hl_whale={ratio:.2f}x",
+                    )
+                    analysis = save_analysis(analysis)
+                    position = await _execute_trade(client, boba, analysis, 0.0, score=score)
+                    if position:
+                        decision.trades_executed = 1
+                        trade_opened = True
 
     # Always update open positions PnL and check SL/TP
     await _manage_positions(client, boba)

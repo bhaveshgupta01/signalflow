@@ -77,6 +77,13 @@ SCORE_WEIGHT_TREND = 0.4
 # Funding extreme = standalone trigger and high-weight confirming signal
 FUNDING_EXTREME_THRESHOLD = 0.00025  # |rate| > 0.025% per 8h ⇒ extreme
 
+# v2.2 — Hyperliquid perp whale flow (hl_get_history type=trades)
+HL_WHALE_TRIGGER_INTERVAL = 180          # poll every 3 min
+HL_WHALE_MIN_FILL_USD = 50000            # a single "whale fill" >= $50k
+HL_WHALE_LOOKBACK_TRADES = 200           # fetch last 200 prints per asset
+HL_WHALE_FLOW_IMBALANCE_RATIO = 2.0      # |buys/sells or sells/buys| >= 2x ⇒ emit signal
+HL_WHALE_MIN_TOTAL_USD = 250000          # only emit if total whale flow >= $250k (signal quality)
+
 # Tradable asset whitelist — anything outside this is rejected at execute time
 TRADABLE_ASSETS = {
     "BTC", "ETH", "SOL", "DOGE", "ARB", "AVAX",

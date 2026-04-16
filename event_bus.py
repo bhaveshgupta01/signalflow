@@ -16,6 +16,7 @@ class TriggerType(str, Enum):
     TOKEN_DISCOVERY = "token_discovery"
     CROSS_CHAIN_OPPORTUNITY = "cross_chain_opportunity"
     PORTFOLIO_UPDATE = "portfolio_update"
+    HL_WHALE_FLOW = "hl_whale_flow"  # v2.2: aggregated Hyperliquid large-fill imbalance per asset
 
 
 @dataclass

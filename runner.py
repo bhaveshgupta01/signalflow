@@ -25,6 +25,7 @@ from mcp_client import BobaClient
 from triggers import (
     cross_chain_trigger,
     funding_trigger,
+    hl_whale_trigger,
     kol_trigger,
     polymarket_trigger,
     portfolio_trigger,
@@ -101,10 +102,11 @@ async def _run() -> None:
     asyncio.create_task(polymarket_trigger(boba, bus))
     asyncio.create_task(kol_trigger(boba, bus))
     asyncio.create_task(funding_trigger(boba, bus))
+    asyncio.create_task(hl_whale_trigger(boba, bus))
     asyncio.create_task(token_discovery_trigger(boba, bus))
     asyncio.create_task(cross_chain_trigger(boba, bus))
     asyncio.create_task(portfolio_trigger(boba, bus))
-    logger.info("6 triggers started. Waiting for events...")
+    logger.info("7 triggers started. Waiting for events...")
 
     # Agent loop — event-driven
     consecutive_errors = 0

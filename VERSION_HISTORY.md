@@ -94,6 +94,50 @@ git checkout v2-fixed-fractional
 
 ---
 
+## v2.2-smart-money-and-oi-flow (target tag: `v2.2`)
+
+**Date:** 2026-04-16
+**Motivation:** The original KOL pipeline (`get_kol_swaps`) had two known problems: (1) every Solana memecoin trade was relabelled as "SOL" so we lost real asset info, (2) the Boba feed went cold on Apr 10 and has returned `{"count":0,"swaps":[]}` ever since. The whale dashboard was effectively frozen.
+
+**What shipped:**
+
+1. **Rewrote `kol_tracker.py`** to use `search_wallets` + `get_wallet_swaps`:
+   - Discovery every 60 min across Solana, Ethereum, Base (top wallets by PnL / win rate / volume, with bot-score filter).
+   - Poll each discovered wallet via `get_wallet_swaps` and preserve the real traded asset. Wrapped assets (WETH/WBTC/WSOL) normalised to their underlying.
+   - Proper BUY → long, SELL → short direction.
+   - Filters to assets in `TRADABLE_ASSETS` — ignores memecoin noise.
+
+2. **Added `hl_whale_trigger` using OI deltas** (`triggers.py`):
+   - Every 3 min snapshots Open Interest per major via `hl_get_markets`.
+   - Compares against prior snapshot, emits `HL_WHALE_FLOW` when |ΔOI| ≥ 5%.
+   - Interprets: OI↑ + price↑ → longs opening (bullish); OI↑ + price↓ → shorts opening (bearish); OI↓ + price↑ → shorts covering (bullish); OI↓ + price↓ → longs capitulating (bearish).
+   - Event flows through `handle_event` → `evaluate_trade` → `_execute_trade` with a synthetic KOL-slot score weighted by ΔOI magnitude.
+
+3. **New `HL_WHALE_FLOW` event type** (`event_bus.py`) and handler in `agent.handle_event` that fetches funding, scores, and fires a trade if the composite score passes.
+
+**Not delivered (server-side block):**
+- `search_wallets` returns `count:0` across Solana/Ethereum/Base. Boba's wallet analytics DB is empty for our account. Pipeline is written correctly; if they populate it, signals will start flowing without code changes.
+- `hl_get_history(type="trades")` doesn't exist (only `candles`/`funding`). That's why the OI-delta approach replaced the trade-tape approach mid-session.
+- `get_holders` also returns `count:0`. Wallet analytics are collectively dead on Boba right now.
+
+**Why the OI-delta approach is actually stronger:**
+OI measures *net committed capital*, not just churn. A $100M trade that opens 1 long and closes 1 short has zero OI change — both cancel. But a $100M net OI increase means $100M of new longs or shorts actually took risk. That's the real institutional signal, cleaner than trade-tape data would have been.
+
+**Files touched:**
+- `kol_tracker.py` — full rewrite (smart money pipeline)
+- `triggers.py` — new `hl_whale_trigger` with OI-delta logic
+- `event_bus.py` — new `HL_WHALE_FLOW` trigger type
+- `agent.py` — new `HL_WHALE_FLOW` branch in `handle_event`
+- `runner.py` — register the new trigger
+- `config.py` — HL whale thresholds (min fill, interval, imbalance ratio)
+
+**To roll back to v2.1.2:**
+```
+git checkout v2.1.2-stdio-first
+```
+
+---
+
 ## v2.1.3-sse-attempt (reverted, kept in history)
 
 **Date:** 2026-04-16

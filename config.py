@@ -68,7 +68,7 @@ CONVICTION_THRESHOLD = 0.45       # legacy floor; v2 also uses per-asset score t
 # A trade fires when |total_score| >= threshold for that asset.
 # Scores: funding ±1.0, polymarket ±0.6, kol ±0.6, trend ±0.4
 SCORE_THRESHOLD_MAJORS = 1.1   # BTC, ETH — high bar (v2.1: was 1.8, unreachable without active funding/KOL)
-SCORE_THRESHOLD_ALTS = 0.8     # everything else (v2.1: was 1.5)
+SCORE_THRESHOLD_ALTS = 0.65    # everything else (v2.1.1: was 0.8; lowered after SOL +22% + uptrend scored 0.68 and got rejected)
 SCORE_WEIGHT_FUNDING = 1.0
 SCORE_WEIGHT_POLYMARKET = 0.6
 SCORE_WEIGHT_KOL = 0.6

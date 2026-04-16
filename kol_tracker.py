@@ -32,8 +32,14 @@ async def detect_kol_signals(boba: BobaClient) -> list[KolSignal]:
     try:
         raw = await boba.call_tool("get_kol_swaps", {"limit": 30})
         swaps = _parse_swaps(raw)
-    except Exception:
-        logger.debug("Could not fetch KOL swaps")
+        logger.info("KOL poll: got %d raw swaps", len(swaps))
+    except Exception as e:
+        logger.warning("get_kol_swaps failed: %s", e)
+        return []
+
+    if not swaps:
+        # Upgrade to INFO so we can see when the feed is empty vs broken
+        logger.info("KOL poll: raw response empty — raw=%s", str(raw)[:200] if raw else "None")
         return []
 
     for swap in swaps:

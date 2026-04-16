@@ -198,7 +198,7 @@ export default function WhalesPage() {
                       fontFamily: "'Inter', sans-serif",
                       boxShadow: "0 4px 24px rgba(0,0,0,0.4)",
                     }}
-                    formatter={(value: number) => [formatUsd(value), "Volume"]}
+                    formatter={(value) => [formatUsd(Number(value)), "Volume"]}
                     cursor={{ fill: "rgba(255,255,255,0.03)" }}
                   />
                   <Bar dataKey="volume" radius={[0, 6, 6, 0]} maxBarSize={24}>
@@ -268,12 +268,13 @@ export default function WhalesPage() {
                       fontFamily: "'Inter', sans-serif",
                       boxShadow: "0 4px 24px rgba(0,0,0,0.4)",
                     }}
-                    labelFormatter={(v: number) => new Date(v).toLocaleString()}
-                    formatter={(_: unknown, name: string, props: { payload?: { name?: string; asset?: string } }) => {
-                      if (props.payload?.name) {
-                        return [`${props.payload.name} - ${props.payload.asset}`, name];
+                    labelFormatter={(v) => new Date(Number(v)).toLocaleString()}
+                    formatter={(value, name, props) => {
+                      const payload = (props as { payload?: { name?: string; asset?: string } }).payload;
+                      if (payload?.name) {
+                        return [`${payload.name} - ${payload.asset}`, name as string];
                       }
-                      return [String(_), name];
+                      return [String(value), name as string];
                     }}
                   />
                   <Scatter name="Long" data={longTrades} fill={COLORS.up} opacity={0.7} />

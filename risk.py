@@ -73,19 +73,35 @@ async def compute_atr(boba, asset: str, period: int = ATR_PERIOD) -> Optional[fl
             logger.debug("ATR: insufficient candle data for %s (%d candles)", asset, len(candles) if candles else 0)
             return None
 
-        # Parse candles — expect dicts with high/low/close or lists [t, o, h, l, c, v]
+        # Parse candles — Hyperliquid candle shapes seen in the wild:
+        #   {"t":..., "o":..., "h":..., "l":..., "c":..., "v":...}
+        #   {"time":..., "open":..., "high":..., "low":..., "close":...}
+        #   {"T":..., "o":..., "h":..., "l":..., "c":...}  (camelCase)
+        #   [t, o, h, l, c, v]
+        # Missing keys fall back to 0 which corrupts TR (bug seen 2026-04-16:
+        # low=0 against close=85 made TR = full price, ATR = asset price).
+        # Fix: reject a candle if any of high/low/close is 0 or non-positive.
         true_ranges = []
         prev_close = None
+        logged_shape = False
         for c in candles:
             if isinstance(c, dict):
-                high = float(c.get("h", c.get("high", 0)))
-                low = float(c.get("l", c.get("low", 0)))
-                close = float(c.get("c", c.get("close", 0)))
+                if not logged_shape:
+                    logger.debug("ATR candle keys for %s: %s", asset, list(c.keys()))
+                    logged_shape = True
+                high = float(c.get("h") or c.get("high") or c.get("H") or c.get("highPx") or 0)
+                low = float(c.get("l") or c.get("low") or c.get("L") or c.get("lowPx") or 0)
+                close = float(c.get("c") or c.get("close") or c.get("C") or c.get("closePx") or 0)
             elif isinstance(c, (list, tuple)) and len(c) >= 5:
+                # Could be [t,o,h,l,c,v] OR [t,o,h,l,c] — both safe
                 high = float(c[2])
                 low = float(c[3])
                 close = float(c[4])
             else:
+                continue
+
+            # Defensive: skip obviously broken rows
+            if high <= 0 or low <= 0 or close <= 0 or high < low:
                 continue
 
             if prev_close is not None:
@@ -103,6 +119,16 @@ async def compute_atr(boba, asset: str, period: int = ATR_PERIOD) -> Optional[fl
 
         # Use the last N true ranges
         atr = sum(true_ranges[-period:]) / period
+
+        # Sanity: a healthy ATR is ~0.2-5% of price. If it's >30% of price the
+        # parse is wrong (previous bug: broken candles made ATR = full price).
+        if prev_close and atr > prev_close * 0.30:
+            logger.warning(
+                "ATR sanity rejection for %s: atr=$%.4f price=$%.4f (%.1f%% — likely broken candles)",
+                asset, atr, prev_close, atr / prev_close * 100,
+            )
+            return None
+
         logger.info("ATR(%d) for %s = $%.4f (%.3f%%)", period, asset, atr, (atr / prev_close * 100) if prev_close else 0)
         return atr
 

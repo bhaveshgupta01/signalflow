@@ -603,132 +603,113 @@ async def _execute_trade(
         logger.warning("Orderbook rejected %s: %s", analysis.suggested_asset, liq_reason)
         return None
 
-    # Direct execution via Boba
-    try:
-        side = "buy" if analysis.suggested_direction == Direction.LONG else "sell"
+    # ── Direct execution via Boba (v2: no LLM fallback) ──
+    # The fallback was masking real execution failures AND skipping v2
+    # telemetry (extreme_price, atr_at_entry, signal_attribution). If any
+    # critical step fails here we log loudly and return None so we see it.
+    side = "buy" if analysis.suggested_direction == Direction.LONG else "sell"
 
-        # Set leverage first
+    # Leverage & market order are the only steps whose failure MUST abort.
+    try:
         await boba.call_tool("hl_update_leverage", {
             "coin": analysis.suggested_asset,
             "leverage": leverage,
             "mode": "cross",
         })
+    except Exception:
+        logger.exception("hl_update_leverage failed for %s — aborting trade", analysis.suggested_asset)
+        return None
 
-        # Place the market order
+    try:
         order_result = await boba.call_tool("hl_place_order", {
             "coin": analysis.suggested_asset,
             "side": side,
             "size": size_usd,
             "type": "market",
         })
-        logger.info("hl_place_order result: %s", str(order_result)[:200])
+        logger.info("hl_place_order (entry) result: %s", str(order_result)[:200])
+    except Exception:
+        logger.exception("Market order failed for %s — aborting trade", analysis.suggested_asset)
+        return None
 
-        # ── NEW: Confirm fill and track slippage ──
-        actual_price, slippage = await confirm_fill_and_track_slippage(
-            boba, analysis.suggested_asset, entry_price, analysis.suggested_direction
+    # Confirm fill (best-effort — don't abort on failure)
+    actual_price, slippage = await confirm_fill_and_track_slippage(
+        boba, analysis.suggested_asset, entry_price, analysis.suggested_direction
+    )
+    if actual_price and actual_price > 0:
+        entry_price = actual_price
+        new_stops = await compute_stop_take_atr(
+            boba, actual_price, analysis.suggested_direction, analysis.suggested_asset
         )
-        if actual_price and actual_price > 0:
-            # Use actual fill price for SL/TP (more accurate)
-            entry_price = actual_price
-            stop_loss, take_profit = await compute_stop_take_atr(
-                boba, actual_price, analysis.suggested_direction, analysis.suggested_asset
+        stop_loss, take_profit = new_stops
+
+    # SL/TP placements are best-effort; mechanical SL/TP is also enforced
+    # in _manage_positions so the position stays safe even if these fail.
+    sl_side = "sell" if analysis.suggested_direction == Direction.LONG else "buy"
+    for label, order_type, trigger in (
+        ("SL", "stop", stop_loss),
+        ("TP", "take_profit", take_profit),
+    ):
+        try:
+            await boba.call_tool("hl_place_order", {
+                "coin": analysis.suggested_asset,
+                "side": sl_side,
+                "size": size_usd,
+                "type": order_type,
+                "triggerPrice": str(trigger),
+            })
+        except Exception as e:
+            logger.warning(
+                "%s order placement failed for %s (%s) — proceeding; mechanical check will still close.",
+                label, analysis.suggested_asset, e,
             )
 
-        # Set stop-loss
-        sl_side = "sell" if analysis.suggested_direction == Direction.LONG else "buy"
-        await boba.call_tool("hl_place_order", {
-            "coin": analysis.suggested_asset,
-            "side": sl_side,
-            "size": size_usd,
-            "type": "stop",
-            "triggerPrice": str(stop_loss),
-        })
+    slippage_note = f" slippage={slippage:+.3%}" if slippage is not None else ""
+    position = Position(
+        analysis_id=analysis.id or 0,
+        asset=analysis.suggested_asset,
+        direction=analysis.suggested_direction,
+        entry_price=entry_price,
+        size_usd=size_usd,
+        leverage=leverage,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+    )
+    position = save_position(position)
 
-        # Set take-profit
-        await boba.call_tool("hl_place_order", {
-            "coin": analysis.suggested_asset,
-            "side": sl_side,
-            "size": size_usd,
-            "type": "take_profit",
-            "triggerPrice": str(take_profit),
-        })
+    # v2: seed chandelier extreme tracker and store ATR for trailing logic
+    from db import update_position as _upd
+    _upd(
+        position.id,
+        extreme_price=entry_price,
+        atr_at_entry=atr if atr else None,
+    )
 
-        slippage_note = f" slippage={slippage:+.3%}" if slippage is not None else ""
-        position = Position(
-            analysis_id=analysis.id or 0,
-            asset=analysis.suggested_asset,
-            direction=analysis.suggested_direction,
-            entry_price=entry_price,
-            size_usd=size_usd,
-            leverage=leverage,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-        )
-        position = save_position(position)
-        # v2: seed chandelier extreme tracker and store ATR for trailing logic
-        from db import update_position as _upd
-        _upd(
-            position.id,
-            extreme_price=entry_price,
-            atr_at_entry=atr if atr else None,
-        )
-        # v2: persist signal attribution if scoring was used
-        if score is not None:
-            try:
-                save_signal_attribution(
-                    position.id,
-                    score_funding=score.score_funding,
-                    score_polymarket=score.score_polymarket,
-                    score_kol=score.score_kol,
-                    score_trend=score.score_trend,
-                    score_total=score.total,
-                    direction=score.direction.value,
-                    notes=" | ".join(score.notes)[:500],
-                )
-            except Exception:
-                logger.debug("Failed to save signal attribution", exc_info=True)
-        logger.info(
-            "Opened %s %s $%.0f @ %.4f (SL: %.2f, TP: %.2f%s)",
-            position.direction.value, position.asset,
-            position.size_usd, position.entry_price,
-            position.stop_loss, position.take_profit, slippage_note,
-        )
-        return position
-    except Exception:
-        logger.exception("Direct trade execution failed for %s", analysis.suggested_asset)
+    # v2: persist signal attribution if scoring was used
+    if score is not None:
+        try:
+            save_signal_attribution(
+                position.id,
+                score_funding=score.score_funding,
+                score_polymarket=score.score_polymarket,
+                score_kol=score.score_kol,
+                score_trend=score.score_trend,
+                score_total=score.total,
+                direction=score.direction.value,
+                notes=" | ".join(score.notes)[:500],
+            )
+        except Exception:
+            logger.debug("Failed to save signal attribution", exc_info=True)
 
-    # Fallback: try via Gemini tool loop
-    try:
-        prompt = TRADE_PROMPT.format(
-            direction=analysis.suggested_direction.value,
-            asset=analysis.suggested_asset,
-            size_usd=size_usd,
-            leverage=leverage,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-        )
-        await _run_tool_loop(client, boba, SYSTEM_PROMPT, prompt)
-
-        position = Position(
-            analysis_id=analysis.id or 0,
-            asset=analysis.suggested_asset,
-            direction=analysis.suggested_direction,
-            entry_price=entry_price,
-            size_usd=size_usd,
-            leverage=leverage,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-        )
-        position = save_position(position)
-        logger.info(
-            "Opened %s %s $%.0f @ %.2f via Gemini fallback (SL: %.2f, TP: %.2f)",
-            position.direction.value, position.asset, position.size_usd,
-            position.entry_price, position.stop_loss, position.take_profit,
-        )
-        return position
-    except Exception:
-        logger.exception("Gemini fallback trade execution also failed for %s", analysis.suggested_asset)
-        return None
+    logger.info(
+        "Opened %s %s $%.0f @ %.4f (SL: %.2f, TP: %.2f%s) atr=%s score=%s",
+        position.direction.value, position.asset,
+        position.size_usd, position.entry_price,
+        position.stop_loss, position.take_profit, slippage_note,
+        f"{atr:.4f}" if atr else "n/a",
+        f"{score.total:+.2f}" if score else "n/a",
+    )
+    return position
 
 
 # ── Phase 5: Position Management ─────────────────────────────────────────────

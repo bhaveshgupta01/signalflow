@@ -1089,10 +1089,21 @@ async def handle_event(client: genai.Client, boba: BobaClient, event: Event) -> 
         except Exception:
             pass
 
+        # Always save to signals table so the dashboard shows what the agent sees
+        interp = event.data.get("interpretation", "")
+        oi_change = event.data.get("oi_change", 0)
+        synthetic_signal = Signal(
+            market_id=f"hl_whale_{asset}_{cycle_id}",
+            market_question=f"HL OI {oi_change*100:+.1f}% on {asset} ({interp})",
+            current_price=event.data.get("mark", 0),
+            price_change_pct=oi_change,
+            timeframe_minutes=HL_WHALE_TRIGGER_INTERVAL // 60,
+            category="hl_whale",
+        )
+        synthetic_signal = save_signal(synthetic_signal)
+
         score = await evaluate_trade(boba, asset, hl_funding_rate=hl_rate)
-        # Boost: the whale event itself is a strong directional KOL-style signal
-        # so inject a synthetic KOL contribution based on the imbalance ratio.
-        whale_intensity = min(1.0, (ratio - 1.0) / 3.0)  # ratio=2 → 0.33, ratio=4 → 1.0
+        whale_intensity = min(1.0, (ratio - 1.0) / 3.0)
         whale_sign = 1.0 if direction == Direction.LONG else -1.0
         from config import SCORE_WEIGHT_KOL
         score.score_kol = whale_sign * whale_intensity * SCORE_WEIGHT_KOL
@@ -1108,15 +1119,6 @@ async def handle_event(client: genai.Client, boba: BobaClient, event: Event) -> 
                 if not allowed_asset and not reason.startswith("FLIP:"):
                     logger.info("HL whale blocked on asset: %s", reason)
                 else:
-                    synthetic_signal = Signal(
-                        market_id=f"hl_whale_{asset}_{cycle_id}",
-                        market_question=f"HL whale imbalance {ratio:.2f}x on {asset}",
-                        current_price=0.5,
-                        price_change_pct=ratio,
-                        timeframe_minutes=HL_WHALE_TRIGGER_INTERVAL // 60,
-                        category="hl_whale",
-                    )
-                    synthetic_signal = save_signal(synthetic_signal)
                     analysis = Analysis(
                         signal_id=synthetic_signal.id or 0,
                         reasoning=f"v2.2 HL whale flow: {score.explain()}",

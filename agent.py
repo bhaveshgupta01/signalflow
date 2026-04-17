@@ -1004,44 +1004,52 @@ async def handle_event(client: genai.Client, boba: BobaClient, event: Event) -> 
                     asset, hl_rate * 100, event.data.get("extreme", False))
 
         # v2: route through the multi-source scoring layer
-        score = await evaluate_trade(boba, asset, hl_funding_rate=hl_rate)
-        logger.info("SCORE %s", score.explain())
-        decision.signals_detected = 1
-        decision.analyses_produced = 1
+        score = None
+        try:
+            score = await asyncio.wait_for(
+                evaluate_trade(boba, asset, hl_funding_rate=hl_rate), timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("evaluate_trade timed out for funding %s — skipping", asset)
+        if score is None:
+            pass  # timeout or error — skip this funding event
+        else:
+            logger.info("SCORE %s", score.explain())
+            decision.signals_detected = 1
+            decision.analyses_produced = 1
 
-        if score.passes():
-            # Pre-trade gates
-            allowed, reason = can_open_position(50, 3)
-            if not allowed:
-                logger.warning("Funding score passed but risk blocked: %s", reason)
-            else:
-                allowed_asset, reason = can_open_position_for_asset(asset, score.direction)
-                if not allowed_asset and not reason.startswith("FLIP:"):
-                    logger.info("Funding score passed but asset blocked: %s", reason)
+            if score.passes():
+                allowed, reason = can_open_position(50, 3)
+                if not allowed:
+                    logger.warning("Funding score passed but risk blocked: %s", reason)
                 else:
-                    synthetic_signal = Signal(
-                        market_id=f"funding_{asset}_{cycle_id}",
-                        market_question=f"Funding extreme: {asset} HL {hl_rate*100:+.4f}%",
-                        current_price=0.5,
-                        price_change_pct=hl_rate,
-                        timeframe_minutes=120,
-                        category="funding",
-                    )
-                    synthetic_signal = save_signal(synthetic_signal)
-                    analysis = Analysis(
-                        signal_id=synthetic_signal.id or 0,
-                        reasoning=f"v2 multi-source: {score.explain()}",
-                        conviction_score=min(1.0, score.confidence / 3.0),
-                        suggested_direction=score.direction,
-                        suggested_asset=asset,
-                        suggested_size_usd=0.0,  # ignored — v2 derives from stop distance
-                        risk_notes=f"leverage=3 hold=4 v2_score={score.total:+.2f}",
-                    )
-                    analysis = save_analysis(analysis)
-                    position = await _execute_trade(client, boba, analysis, 0.0, score=score)
-                    if position:
-                        decision.trades_executed = 1
-                        trade_opened = True
+                    allowed_asset, reason = can_open_position_for_asset(asset, score.direction)
+                    if not allowed_asset and not reason.startswith("FLIP:"):
+                        logger.info("Funding score passed but asset blocked: %s", reason)
+                    else:
+                        synthetic_signal = Signal(
+                            market_id=f"funding_{asset}_{cycle_id}",
+                            market_question=f"Funding extreme: {asset} HL {hl_rate*100:+.4f}%",
+                            current_price=0.5,
+                            price_change_pct=hl_rate,
+                            timeframe_minutes=120,
+                            category="funding",
+                        )
+                        synthetic_signal = save_signal(synthetic_signal)
+                        analysis = Analysis(
+                            signal_id=synthetic_signal.id or 0,
+                            reasoning=f"v2 multi-source: {score.explain()}",
+                            conviction_score=min(1.0, score.confidence / 3.0),
+                            suggested_direction=score.direction,
+                            suggested_asset=asset,
+                            suggested_size_usd=0.0,
+                            risk_notes=f"leverage=3 hold=4 v2_score={score.total:+.2f}",
+                        )
+                        analysis = save_analysis(analysis)
+                        position = await _execute_trade(client, boba, analysis, 0.0, score=score)
+                        if position:
+                            decision.trades_executed = 1
+                            trade_opened = True
 
     elif event.trigger == TriggerType.TOKEN_DISCOVERY:
         symbol = event.data.get("symbol", "")
@@ -1102,37 +1110,46 @@ async def handle_event(client: genai.Client, boba: BobaClient, event: Event) -> 
         )
         synthetic_signal = save_signal(synthetic_signal)
 
-        score = await evaluate_trade(boba, asset, hl_funding_rate=hl_rate)
-        whale_intensity = min(1.0, (ratio - 1.0) / 3.0)
-        whale_sign = 1.0 if direction == Direction.LONG else -1.0
-        from config import SCORE_WEIGHT_KOL
-        score.score_kol = whale_sign * whale_intensity * SCORE_WEIGHT_KOL
-        score.notes.append(f"HL whale ratio={ratio:.2f}x → {score.score_kol:+.2f}")
-        logger.info("SCORE (HL whale) %s", score.explain())
+        score = None
+        try:
+            score = await asyncio.wait_for(
+                evaluate_trade(boba, asset, hl_funding_rate=hl_rate), timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("evaluate_trade timed out for HL whale %s — skipping", asset)
+        if score is None:
+            pass  # timeout — skip this HL whale event
+        else:
+            whale_intensity = min(1.0, (ratio - 1.0) / 3.0)
+            whale_sign = 1.0 if direction == Direction.LONG else -1.0
+            from config import SCORE_WEIGHT_KOL
+            score.score_kol = whale_sign * whale_intensity * SCORE_WEIGHT_KOL
+            score.notes.append(f"HL whale ratio={ratio:.2f}x → {score.score_kol:+.2f}")
+            logger.info("SCORE (HL whale) %s", score.explain())
 
-        if score.passes():
-            allowed, reason = can_open_position(50, 3)
-            if not allowed:
-                logger.warning("HL whale score passed but risk blocked: %s", reason)
-            else:
-                allowed_asset, reason = can_open_position_for_asset(asset, score.direction)
-                if not allowed_asset and not reason.startswith("FLIP:"):
-                    logger.info("HL whale blocked on asset: %s", reason)
+            if score.passes():
+                allowed, reason = can_open_position(50, 3)
+                if not allowed:
+                    logger.warning("HL whale score passed but risk blocked: %s", reason)
                 else:
-                    analysis = Analysis(
-                        signal_id=synthetic_signal.id or 0,
-                        reasoning=f"v2.2 HL whale flow: {score.explain()}",
-                        conviction_score=min(1.0, score.confidence / 3.0),
-                        suggested_direction=score.direction,
-                        suggested_asset=asset,
-                        suggested_size_usd=0.0,
-                        risk_notes=f"leverage=3 hold=4 v2_score={score.total:+.2f} hl_whale={ratio:.2f}x",
-                    )
-                    analysis = save_analysis(analysis)
-                    position = await _execute_trade(client, boba, analysis, 0.0, score=score)
-                    if position:
-                        decision.trades_executed = 1
-                        trade_opened = True
+                    allowed_asset, reason = can_open_position_for_asset(asset, score.direction)
+                    if not allowed_asset and not reason.startswith("FLIP:"):
+                        logger.info("HL whale blocked on asset: %s", reason)
+                    else:
+                        analysis = Analysis(
+                            signal_id=synthetic_signal.id or 0,
+                            reasoning=f"v2.2 HL whale flow: {score.explain()}",
+                            conviction_score=min(1.0, score.confidence / 3.0),
+                            suggested_direction=score.direction,
+                            suggested_asset=asset,
+                            suggested_size_usd=0.0,
+                            risk_notes=f"leverage=3 hold=4 v2_score={score.total:+.2f} hl_whale={ratio:.2f}x",
+                        )
+                        analysis = save_analysis(analysis)
+                        position = await _execute_trade(client, boba, analysis, 0.0, score=score)
+                        if position:
+                            decision.trades_executed = 1
+                            trade_opened = True
 
     # Always update open positions PnL and check SL/TP
     await _manage_positions(client, boba)
@@ -1182,28 +1199,27 @@ async def _process_signal(
     except Exception:
         logger.debug("Couldn't fetch funding for %s in score", asset_u)
 
-    # ── v2.1: BTC/ETH Polymarket gate ──
-    # Historical data (v1+v2): BTC/ETH Polymarket-driven trades lost ~$23 net.
-    # Only trade majors on Polymarket signals when funding is already extreme,
-    # i.e. PM is confirming an orthogonal edge rather than being the sole edge.
-    if asset_u in ASSET_MAJORS:
-        from config import FUNDING_EXTREME_THRESHOLD
-        has_funding_edge = hl_rate is not None and abs(hl_rate) >= FUNDING_EXTREME_THRESHOLD
-        if not has_funding_edge:
-            logger.info(
-                "BTC/ETH PM gate: %s — no funding edge (rate=%s), skipping PM-only major trade",
-                asset_u,
-                f"{hl_rate * 100:+.4f}%" if hl_rate is not None else "n/a",
-            )
-            return None
+    # v2.1 had a BTC/ETH PM gate here that required extreme funding before
+    # allowing any PM signal on majors. Removed in v2.2.2: overnight audit
+    # showed it killed a legitimate 0.70-conviction ETH short backed by a
+    # -43.7% PM move. The scoring system's SCORE_THRESHOLD_MAJORS (1.1) already
+    # provides a higher bar for BTC/ETH vs alts (0.65). Double-filtering was
+    # too aggressive — the agent went 8 hours without trading despite real setups.
 
-    score = await evaluate_trade(
-        boba,
-        asset_u,
-        hl_funding_rate=hl_rate,
-        pm_price_change=signal.price_change_pct,
-        pm_direction_hint=analysis.suggested_direction,
-    )
+    try:
+        score = await asyncio.wait_for(
+            evaluate_trade(
+                boba,
+                asset_u,
+                hl_funding_rate=hl_rate,
+                pm_price_change=signal.price_change_pct,
+                pm_direction_hint=analysis.suggested_direction,
+            ),
+            timeout=30.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("evaluate_trade timed out for PM signal %s — skipping", asset_u)
+        return None
     logger.info("SCORE %s", score.explain())
 
     if not score.passes():

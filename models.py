@@ -121,3 +121,57 @@ class AgentDecision(BaseModel):
     trades_executed: int = 0
     reasoning_summary: str = ""
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ── v3: Trade Proposals ─────────────────────────────────────────────────────
+
+class ProposalStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+    EXECUTED = "executed"
+
+
+class TradeProposal(BaseModel):
+    """A specialist agent's trade proposal, awaiting orchestrator decision."""
+
+    id: Optional[int] = None
+    agent_id: str                                      # 'pm_analyst', 'funding_analyst', etc.
+    asset: str
+    direction: Direction
+    conviction: float = Field(ge=0.0, le=1.0)
+    edge_type: str = ""                                # 'sentiment', 'funding', 'oi_flow', 'momentum', 'mean_revert'
+    reasoning: str
+    suggested_risk_pct: float = 0.015
+    timeframe_hours: float = 4.0
+    invalidation: str = ""
+    status: ProposalStatus = ProposalStatus.PENDING
+    allocated_risk_pct: Optional[float] = None         # set by orchestrator on approval
+    orchestrator_reason: str = ""                      # why approved/rejected
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    decided_at: Optional[datetime] = None
+    executed_at: Optional[datetime] = None
+
+
+# ── v3: Regime Assessments ──────────────────────────────────────────────────
+
+class RegimeType(str, Enum):
+    TRENDING_UP = "trending_up"
+    TRENDING_DOWN = "trending_down"
+    RANGING = "ranging"
+    VOLATILE = "volatile"
+
+
+class RegimeAssessment(BaseModel):
+    """Trend Analyst's view of the market regime for an asset."""
+
+    id: Optional[int] = None
+    asset: str
+    regime: RegimeType
+    strength: float = 0.0
+    support: Optional[float] = None
+    resistance: Optional[float] = None
+    atr_expanding: bool = False
+    recommendation: str = ""
+    created_at: datetime = Field(default_factory=datetime.utcnow)

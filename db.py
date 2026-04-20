@@ -14,7 +14,11 @@ from models import (
     Position,
     PositionSnapshot,
     PositionStatus,
+    ProposalStatus,
+    RegimeAssessment,
+    RegimeType,
     Signal,
+    TradeProposal,
     WalletSnapshot,
 )
 from config import DB_PATH
@@ -137,6 +141,58 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_kol_signals_detected_at ON kol_signals(detected_at);
     """)
 
+    # v3: trade proposals from specialists -> orchestrator
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS trade_proposals (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id           TEXT NOT NULL,
+            asset              TEXT NOT NULL,
+            direction          TEXT NOT NULL,
+            conviction         REAL NOT NULL,
+            edge_type          TEXT DEFAULT '',
+            reasoning          TEXT NOT NULL,
+            suggested_risk_pct REAL DEFAULT 0.015,
+            timeframe_hours    REAL DEFAULT 4.0,
+            invalidation       TEXT DEFAULT '',
+            status             TEXT DEFAULT 'pending',
+            allocated_risk_pct REAL,
+            orchestrator_reason TEXT DEFAULT '',
+            created_at         TEXT NOT NULL,
+            decided_at         TEXT,
+            executed_at        TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS regime_assessments (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset           TEXT NOT NULL,
+            regime          TEXT NOT NULL,
+            strength        REAL DEFAULT 0.0,
+            support         REAL,
+            resistance      REAL,
+            atr_expanding   BOOLEAN DEFAULT 0,
+            recommendation  TEXT DEFAULT '',
+            created_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_performance (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id        TEXT NOT NULL,
+            period          TEXT NOT NULL,
+            trades          INTEGER DEFAULT 0,
+            wins            INTEGER DEFAULT 0,
+            total_pnl       REAL DEFAULT 0.0,
+            avg_conviction  REAL DEFAULT 0.0,
+            sharpe_ratio    REAL,
+            computed_at     TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_trade_proposals_status ON trade_proposals(status);
+        CREATE INDEX IF NOT EXISTS idx_trade_proposals_agent ON trade_proposals(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_trade_proposals_created ON trade_proposals(created_at);
+        CREATE INDEX IF NOT EXISTS idx_regime_assessments_asset ON regime_assessments(asset);
+        CREATE INDEX IF NOT EXISTS idx_agent_performance_agent ON agent_performance(agent_id);
+    """)
+
     # v2 ALTERs (idempotent — guarded by PRAGMA check)
     existing_cols = {
         row["name"]
@@ -146,6 +202,20 @@ def init_db() -> None:
         conn.execute("ALTER TABLE positions ADD COLUMN extreme_price REAL")
     if "atr_at_entry" not in existing_cols:
         conn.execute("ALTER TABLE positions ADD COLUMN atr_at_entry REAL")
+    # v3: agent_id + proposal_id on positions
+    if "agent_id" not in existing_cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN agent_id TEXT DEFAULT 'legacy'")
+    if "proposal_id" not in existing_cols:
+        conn.execute("ALTER TABLE positions ADD COLUMN proposal_id INTEGER")
+
+    # v3: agent_id on signal_attribution
+    sa_cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(signal_attribution)").fetchall()
+    }
+    if "agent_id" not in sa_cols:
+        conn.execute("ALTER TABLE signal_attribution ADD COLUMN agent_id TEXT DEFAULT 'legacy'")
+
     conn.commit()
 
 
@@ -651,6 +721,189 @@ def get_trade_events(minutes: int = 999999) -> list[dict]:
     return sorted(events, key=lambda e: e["timestamp"])
 
 
+# ── v3: Trade Proposals ──────────────────────────────────────────────────────
+
+def save_proposal(p: TradeProposal) -> TradeProposal:
+    conn = _get_conn()
+    cur = conn.execute(
+        """INSERT INTO trade_proposals
+           (agent_id, asset, direction, conviction, edge_type, reasoning,
+            suggested_risk_pct, timeframe_hours, invalidation, status,
+            allocated_risk_pct, orchestrator_reason, created_at, decided_at, executed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (p.agent_id, p.asset, p.direction.value, p.conviction, p.edge_type,
+         p.reasoning, p.suggested_risk_pct, p.timeframe_hours, p.invalidation,
+         p.status.value, p.allocated_risk_pct, p.orchestrator_reason,
+         p.created_at.isoformat(), p.decided_at.isoformat() if p.decided_at else None,
+         p.executed_at.isoformat() if p.executed_at else None),
+    )
+    conn.commit()
+    p.id = cur.lastrowid
+    return p
+
+
+def get_pending_proposals() -> list[TradeProposal]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM trade_proposals WHERE status = 'pending' ORDER BY created_at ASC"
+    ).fetchall()
+    return [_row_to_proposal(r) for r in rows]
+
+
+def get_approved_proposals() -> list[TradeProposal]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM trade_proposals WHERE status = 'approved' ORDER BY created_at ASC"
+    ).fetchall()
+    return [_row_to_proposal(r) for r in rows]
+
+
+def update_proposal(
+    proposal_id: int,
+    *,
+    status: ProposalStatus | None = None,
+    allocated_risk_pct: float | None = None,
+    orchestrator_reason: str | None = None,
+    decided_at: datetime | None = None,
+    executed_at: datetime | None = None,
+) -> None:
+    conn = _get_conn()
+    updates: list[str] = []
+    params: list = []
+    if status is not None:
+        updates.append("status = ?")
+        params.append(status.value)
+    if allocated_risk_pct is not None:
+        updates.append("allocated_risk_pct = ?")
+        params.append(allocated_risk_pct)
+    if orchestrator_reason is not None:
+        updates.append("orchestrator_reason = ?")
+        params.append(orchestrator_reason)
+    if decided_at is not None:
+        updates.append("decided_at = ?")
+        params.append(decided_at.isoformat())
+    if executed_at is not None:
+        updates.append("executed_at = ?")
+        params.append(executed_at.isoformat())
+    if not updates:
+        return
+    params.append(proposal_id)
+    conn.execute(f"UPDATE trade_proposals SET {', '.join(updates)} WHERE id = ?", params)
+    conn.commit()
+
+
+def expire_old_proposals(minutes: int = 10) -> int:
+    """Mark old pending proposals as expired. Returns count expired."""
+    conn = _get_conn()
+    cutoff = (datetime.utcnow() - timedelta(minutes=minutes)).isoformat()
+    cur = conn.execute(
+        "UPDATE trade_proposals SET status = 'expired' WHERE status = 'pending' AND created_at < ?",
+        (cutoff,),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def get_recent_proposals(agent_id: str | None = None, limit: int = 20) -> list[TradeProposal]:
+    conn = _get_conn()
+    if agent_id:
+        rows = conn.execute(
+            "SELECT * FROM trade_proposals WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?",
+            (agent_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM trade_proposals ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [_row_to_proposal(r) for r in rows]
+
+
+# ── v3: Regime Assessments ──────────────────────────────────────────────────
+
+def save_regime(r: RegimeAssessment) -> RegimeAssessment:
+    conn = _get_conn()
+    cur = conn.execute(
+        """INSERT INTO regime_assessments
+           (asset, regime, strength, support, resistance, atr_expanding, recommendation, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (r.asset, r.regime.value, r.strength, r.support, r.resistance,
+         1 if r.atr_expanding else 0, r.recommendation, r.created_at.isoformat()),
+    )
+    conn.commit()
+    r.id = cur.lastrowid
+    return r
+
+
+def get_latest_regime(asset: str) -> RegimeAssessment | None:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM regime_assessments WHERE UPPER(asset) = ? ORDER BY created_at DESC LIMIT 1",
+        (asset.upper(),),
+    ).fetchone()
+    return _row_to_regime(row) if row else None
+
+
+# ── v3: Agent Performance ───────────────────────────────────────────────────
+
+def save_agent_performance(
+    agent_id: str,
+    period: str,
+    trades: int,
+    wins: int,
+    total_pnl: float,
+    avg_conviction: float = 0.0,
+    sharpe_ratio: float | None = None,
+) -> None:
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO agent_performance
+           (agent_id, period, trades, wins, total_pnl, avg_conviction, sharpe_ratio, computed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (agent_id, period, trades, wins, total_pnl, avg_conviction, sharpe_ratio,
+         datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+
+
+def get_agent_performance(agent_id: str, period: str = "7d") -> dict:
+    """Return latest computed performance for an agent."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM agent_performance WHERE agent_id = ? AND period = ? ORDER BY computed_at DESC LIMIT 1",
+        (agent_id, period),
+    ).fetchone()
+    if not row:
+        return {"trades": 0, "wins": 0, "total_pnl": 0.0, "avg_conviction": 0.0, "sharpe_ratio": None}
+    return {
+        "trades": row["trades"],
+        "wins": row["wins"],
+        "win_rate": (row["wins"] / row["trades"] * 100) if row["trades"] > 0 else 0.0,
+        "total_pnl": row["total_pnl"],
+        "avg_conviction": row["avg_conviction"],
+        "sharpe_ratio": row["sharpe_ratio"],
+    }
+
+
+def compute_agent_stats(agent_id: str, days: int = 7) -> dict:
+    """Compute live performance stats for an agent from positions table."""
+    conn = _get_conn()
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        "SELECT pnl, status FROM positions WHERE agent_id = ? AND status != 'open' AND opened_at >= ?",
+        (agent_id, cutoff),
+    ).fetchall()
+    if not rows:
+        return {"trades": 0, "wins": 0, "win_rate": 0.0, "total_pnl": 0.0}
+    wins = sum(1 for r in rows if r["pnl"] > 0)
+    total_pnl = sum(r["pnl"] for r in rows)
+    return {
+        "trades": len(rows),
+        "wins": wins,
+        "win_rate": round(wins / len(rows) * 100, 1),
+        "total_pnl": round(total_pnl, 2),
+    }
+
+
 # ── Row converters ────────────────────────────────────────────────────────────
 
 def _row_to_signal(r: sqlite3.Row) -> Signal:
@@ -715,4 +968,31 @@ def _row_to_position_snapshot(r: sqlite3.Row) -> PositionSnapshot:
         id=r["id"], position_id=r["position_id"], asset=r["asset"],
         current_price=r["current_price"], unrealized_pnl=r["unrealized_pnl"],
         timestamp=datetime.fromisoformat(r["timestamp"]),
+    )
+
+
+def _row_to_proposal(r: sqlite3.Row) -> TradeProposal:
+    return TradeProposal(
+        id=r["id"], agent_id=r["agent_id"], asset=r["asset"],
+        direction=Direction(r["direction"]), conviction=r["conviction"],
+        edge_type=r["edge_type"] or "", reasoning=r["reasoning"],
+        suggested_risk_pct=r["suggested_risk_pct"], timeframe_hours=r["timeframe_hours"],
+        invalidation=r["invalidation"] or "",
+        status=ProposalStatus(r["status"]),
+        allocated_risk_pct=r["allocated_risk_pct"],
+        orchestrator_reason=r["orchestrator_reason"] or "",
+        created_at=datetime.fromisoformat(r["created_at"]),
+        decided_at=datetime.fromisoformat(r["decided_at"]) if r["decided_at"] else None,
+        executed_at=datetime.fromisoformat(r["executed_at"]) if r["executed_at"] else None,
+    )
+
+
+def _row_to_regime(r: sqlite3.Row) -> RegimeAssessment:
+    return RegimeAssessment(
+        id=r["id"], asset=r["asset"],
+        regime=RegimeType(r["regime"]), strength=r["strength"],
+        support=r["support"], resistance=r["resistance"],
+        atr_expanding=bool(r["atr_expanding"]),
+        recommendation=r["recommendation"] or "",
+        created_at=datetime.fromisoformat(r["created_at"]),
     )

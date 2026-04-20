@@ -1,7 +1,8 @@
-"""SignalFlow entry point — event-driven agent loop.
+"""SignalFlow entry point — v3 multi-agent event loop.
 
 Starts async trigger tasks that push events onto an EventBus,
-consumed by the agent in a single loop.
+consumed by the V3EventRouter which dispatches to specialist agents.
+The Orchestrator runs as a background task, batching proposals every 30s.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ import sys
 
 from google import genai
 
-from agent import handle_event
 from config import (
     GEMINI_API_KEY,
     GCP_PROJECT,
@@ -32,10 +32,34 @@ from triggers import (
     token_discovery_trigger,
 )
 
+import sys
+
+# Force immediate flush on every log line (critical for redirected output)
+handler = logging.StreamHandler(sys.stderr)
+handler.setLevel(logging.INFO)
+handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+))
+
+
+class _FlushHandler(logging.StreamHandler):
+    """Flush after every emit so redirected output appears immediately."""
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+
+flush_handler = _FlushHandler(sys.stdout)
+flush_handler.setLevel(logging.INFO)
+flush_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+))
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
+    handlers=[flush_handler],
 )
 logger = logging.getLogger("signalflow")
 
@@ -85,6 +109,8 @@ async def _connect_boba_with_retry(max_retries: int = 5) -> BobaClient:
 
 
 async def _run() -> None:
+    from agent_v3 import V3EventRouter
+
     # Initialise persistence
     init_db()
     logger.info("Database initialised")
@@ -106,34 +132,42 @@ async def _run() -> None:
     asyncio.create_task(token_discovery_trigger(boba, bus))
     asyncio.create_task(cross_chain_trigger(boba, bus))
     asyncio.create_task(portfolio_trigger(boba, bus))
-    logger.info("7 triggers started. Waiting for events...")
+    logger.info("7 triggers started — v3 multi-agent pipeline active")
 
-    # Agent loop — event-driven
+    # v3 multi-agent pipeline
+    router = V3EventRouter(client, boba, bus)
+    orchestrator_task = asyncio.create_task(router.orchestrator.run_loop())
+
     consecutive_errors = 0
     try:
         while True:
             event = await bus.consume()
             logger.info(
                 "Event [%s]: %s",
-                event.trigger.value,
-                str(event.data)[:100],
+                event.trigger.value, str(event.data)[:100],
             )
             try:
-                await handle_event(client, boba, event)
+                await router.handle_event(event)
                 consecutive_errors = 0
             except Exception:
                 consecutive_errors += 1
                 logger.exception("Error handling event (consecutive: %d)", consecutive_errors)
                 if consecutive_errors > 10:
-                    logger.error("Too many consecutive errors — attempting Boba reconnect")
+                    logger.error("Too many errors — attempting Boba reconnect")
                     try:
                         await boba.disconnect()
                         boba = await _connect_boba_with_retry()
+                        router = V3EventRouter(client, boba, bus)
+                        orchestrator_task.cancel()
+                        orchestrator_task = asyncio.create_task(router.orchestrator.run_loop())
                         consecutive_errors = 0
                     except Exception:
                         logger.exception("Reconnection failed")
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down...")
+    finally:
+        router.orchestrator.stop()
+        orchestrator_task.cancel()
         await boba.disconnect()
 
 

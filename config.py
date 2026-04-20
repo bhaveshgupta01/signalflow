@@ -123,5 +123,20 @@ PAPER_WALLET_STARTING_BALANCE = 100.0
 MAX_PORTFOLIO_EXPOSURE_USD = 1000   # max total USD across all open positions
 MAX_CONCURRENT_POSITIONS = 8       # raised from 5 — more assets, more diversification
 
+# ── v3 Multi-Agent Architecture ─────────────────────────────────────────────
+# Per-agent Gemini models: flash-lite for specialists, flash for orchestrator
+SPECIALIST_MODEL = "gemini-2.5-flash-lite"    # 4K RPM, 4M TPM
+ORCHESTRATOR_MODEL = "gemini-2.5-flash"       # 1K RPM, 1M TPM
+
+# Orchestrator batches pending proposals at this interval
+ORCHESTRATOR_BATCH_INTERVAL = 30  # seconds
+
+# Proposal expiry: pending proposals older than this are auto-expired
+PROPOSAL_EXPIRY_MINUTES = 5  # v3.1: reduced from 10 — stale proposals are worthless
+
+# High-conviction threshold: if a specialist proposal exceeds this,
+# the orchestrator is nudged immediately instead of waiting for the batch timer
+HIGH_CONVICTION_THRESHOLD = 0.60  # v3.1: lowered from 0.75 — most good proposals were expiring
+
 # ── Dashboard ────────────────────────────────────────────────────────────────
 DASHBOARD_REFRESH_SECONDS = 10

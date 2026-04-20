@@ -7,6 +7,7 @@ Supports two connection modes:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -85,12 +86,18 @@ async def _get_boba_access_token() -> str | None:
 
 
 class BobaClient:
-    """Manages a persistent MCP session with the Boba agent server."""
+    """Manages a persistent MCP session with the Boba agent server.
+
+    MCP stdio sessions are NOT safe for concurrent requests — sending two
+    requests on the same pipe can deadlock. We use an asyncio.Lock to
+    serialize all call_tool invocations.
+    """
 
     def __init__(self) -> None:
         self.session: ClientSession | None = None
         self._tools: list[dict] | None = None
         self._exit_stack: AsyncExitStack | None = None
+        self._call_lock: asyncio.Lock = asyncio.Lock()
 
     async def connect(self) -> None:
         """Connect to Boba MCP — tries stdio first, falls back to SSE.
@@ -180,15 +187,45 @@ class BobaClient:
             raise RuntimeError("Not connected — call connect() first")
         return self._tools
 
-    async def call_tool(self, name: str, arguments: dict) -> str:
+    async def call_tool(self, name: str, arguments: dict, timeout: float = 30.0) -> str:
         if self.session is None:
             raise RuntimeError("Not connected — call connect() first")
-        result = await self.session.call_tool(name, arguments)
+        async with self._call_lock:
+            try:
+                result = await asyncio.wait_for(
+                    self.session.call_tool(name, arguments),
+                    timeout=timeout,
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                logger.warning(
+                    "Boba tool %s timed out after %.0fs — reconnecting session",
+                    name, timeout,
+                )
+                # The stdio pipe is stuck. Reconnect to get a fresh pipe.
+                await self._reconnect()
+                raise TimeoutError(f"Boba tool {name} timed out after {timeout}s")
         parts: list[str] = []
         for block in result.content:
             if hasattr(block, "text"):
                 parts.append(block.text)
         return "\n".join(parts) if parts else str(result.content)
+
+    async def _reconnect(self) -> None:
+        """Kill the stuck session and establish a fresh one."""
+        logger.info("Boba: reconnecting stdio session...")
+        try:
+            if self._exit_stack:
+                await self._exit_stack.aclose()
+        except Exception:
+            pass
+        self._exit_stack = None
+        self.session = None
+        self._tools = None
+        try:
+            await self._connect_stdio()
+            logger.info("Boba: reconnected successfully (%d tools)", len(self._tools or []))
+        except Exception as e:
+            logger.error("Boba: reconnection failed: %s", e)
 
     async def disconnect(self) -> None:
         if self._exit_stack:
